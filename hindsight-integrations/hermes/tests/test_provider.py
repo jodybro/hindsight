@@ -288,3 +288,60 @@ def test_prefer_observations_is_in_the_config_schema(provider):
     schema = {entry["key"]: entry for entry in instance.get_config_schema()}
     assert schema["prefer_observations"]["default"] is False
     instance.shutdown()
+
+
+def test_recall_omits_trace_by_default(provider):
+    """Default off: the arecall kwargs stay exactly what they were before the gate."""
+    instance, fake = provider({"recall_sync": True}, client=FakeClient(recall_texts=["fact one"]))
+    instance.prefetch("what do you know?")
+    assert "trace" not in fake.recalls[0]
+    instance.shutdown()
+
+
+def test_recall_trace_true_is_sent_on_sync_auto_recall(provider):
+    instance, fake = provider(
+        {"recall_sync": True, "recall_trace": True}, client=FakeClient(recall_texts=["fact one"])
+    )
+    block = instance.prefetch("what do you know?")
+    assert "- fact one" in block
+    assert fake.recalls[0]["trace"] is True
+    instance.shutdown()
+
+
+def test_recall_trace_true_is_sent_on_background_prefetch(provider):
+    """The default auto-recall path (recall_sync off): queue_prefetch's worker thread."""
+    instance, fake = provider(
+        {"recall_trace": True, "prefetch_waits_for_retain": False},
+        client=FakeClient(recall_texts=["fact one"]),
+    )
+    instance.queue_prefetch("what do you know?")
+    instance._prefetch_thread.join(timeout=5)
+    assert fake.recalls and fake.recalls[0]["trace"] is True
+    assert "- fact one" in instance.prefetch("next turn")
+    instance.shutdown()
+
+
+def test_recall_trace_string_values_are_parsed(provider):
+    on, fake_on = provider({"recall_sync": True, "recall_trace": "true"})
+    on.prefetch("q")
+    assert fake_on.recalls[0]["trace"] is True
+    on.shutdown()
+
+    off, fake_off = provider({"recall_sync": True, "recall_trace": "false"})
+    off.prefetch("q")
+    assert "trace" not in fake_off.recalls[0]
+    off.shutdown()
+
+
+def test_recall_trace_also_applies_to_the_recall_tool(provider):
+    instance, fake = provider({"recall_trace": True}, client=FakeClient(recall_texts=["fact one"]))
+    instance.handle_tool_call("hindsight_recall", {"query": "who am I?"})
+    assert fake.recalls[0]["trace"] is True
+    instance.shutdown()
+
+
+def test_recall_trace_is_in_the_config_schema(provider):
+    instance, _ = provider({})
+    schema = {entry["key"]: entry for entry in instance.get_config_schema()}
+    assert schema["recall_trace"]["default"] is False
+    instance.shutdown()
