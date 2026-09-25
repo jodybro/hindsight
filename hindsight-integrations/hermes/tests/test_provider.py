@@ -230,3 +230,61 @@ def test_retain_session_tags_is_in_the_config_schema(provider):
     schema = {entry["key"]: entry for entry in instance.get_config_schema()}
     assert schema["retain_session_tags"]["default"] is True
     instance.shutdown()
+
+
+def test_recall_omits_prefer_observations_by_default(provider):
+    """Default off: the arecall kwargs stay exactly what they were before the gate."""
+    instance, fake = provider({"recall_sync": True}, client=FakeClient(recall_texts=["fact one"]))
+    instance.prefetch("what do you know?")
+    assert "prefer_observations" not in fake.recalls[0]
+    instance.shutdown()
+
+
+def test_prefer_observations_true_is_sent_on_sync_auto_recall(provider):
+    instance, fake = provider(
+        {"recall_sync": True, "prefer_observations": True}, client=FakeClient(recall_texts=["fact one"])
+    )
+    block = instance.prefetch("what do you know?")
+    assert "- fact one" in block
+    assert fake.recalls[0]["prefer_observations"] is True
+    assert fake.recalls[0]["types"] == ["observation"]  # recall_types default untouched
+    instance.shutdown()
+
+
+def test_prefer_observations_true_is_sent_on_background_prefetch(provider):
+    """The default auto-recall path (recall_sync off): queue_prefetch's worker thread."""
+    instance, fake = provider(
+        {"prefer_observations": True, "prefetch_waits_for_retain": False},
+        client=FakeClient(recall_texts=["fact one"]),
+    )
+    instance.queue_prefetch("what do you know?")
+    instance._prefetch_thread.join(timeout=5)
+    assert fake.recalls and fake.recalls[0]["prefer_observations"] is True
+    assert "- fact one" in instance.prefetch("next turn")
+    instance.shutdown()
+
+
+def test_prefer_observations_string_values_are_parsed(provider):
+    on, fake_on = provider({"recall_sync": True, "prefer_observations": "true"})
+    on.prefetch("q")
+    assert fake_on.recalls[0]["prefer_observations"] is True
+    on.shutdown()
+
+    off, fake_off = provider({"recall_sync": True, "prefer_observations": "false"})
+    off.prefetch("q")
+    assert "prefer_observations" not in fake_off.recalls[0]
+    off.shutdown()
+
+
+def test_prefer_observations_also_applies_to_the_recall_tool(provider):
+    instance, fake = provider({"prefer_observations": True}, client=FakeClient(recall_texts=["fact one"]))
+    instance.handle_tool_call("hindsight_recall", {"query": "who am I?"})
+    assert fake.recalls[0]["prefer_observations"] is True
+    instance.shutdown()
+
+
+def test_prefer_observations_is_in_the_config_schema(provider):
+    instance, _ = provider({})
+    schema = {entry["key"]: entry for entry in instance.get_config_schema()}
+    assert schema["prefer_observations"]["default"] is False
+    instance.shutdown()

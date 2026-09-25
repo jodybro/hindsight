@@ -626,6 +626,11 @@ class HindsightMemoryProvider(MemoryProvider):
                 "description": "Fact types to surface on recall — applies to both auto-recall and the hindsight_recall tool (comma-separated or list). Defaults to observation-only — observations are Hindsight's consolidated, deduplicated, evidence-grounded knowledge layer; raw world/experience facts are the supporting evidence observations already summarize. Set to e.g. 'observation,world,experience' to also include raw facts.",
                 "default": "observation",
             },
+            {
+                "key": "prefer_observations",
+                "description": "On recall (auto-recall and the hindsight_recall tool), ask Hindsight to drop raw world/experience facts that a returned observation was consolidated from, so the observation supersedes them and freed slots backfill with the next results. Only has an effect when recall_types includes 'observation' plus at least one raw type ('world'/'experience'); with the observation-only default it is a no-op.",
+                "default": False,
+            },
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {
                 "key": "recall_sync",
@@ -1090,6 +1095,9 @@ class HindsightMemoryProvider(MemoryProvider):
             self._recall_types = [t.strip() for t in configured_types.split(",") if t.strip()]
         else:
             self._recall_types = list([] if configured_types is None else configured_types) or ["observation"]
+        # Server-side dedup of raw facts under the observations that summarize them;
+        # only sent when on, so off keeps the arecall kwargs byte-identical.
+        self._prefer_observations = _parse_bool_setting(cfg.get("prefer_observations"), False)
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
 
@@ -1201,6 +1209,8 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs.update(tags=self._recall_tags, tags_match=self._recall_tags_match)
         if self._recall_types:
             kwargs["types"] = self._recall_types
+        if self._prefer_observations:
+            kwargs["prefer_observations"] = True
         resp = self._run_hindsight_operation(lambda client: client.arecall(**kwargs))
         return resp.results or []
 
