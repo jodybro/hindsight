@@ -345,3 +345,122 @@ def test_recall_trace_is_in_the_config_schema(provider):
     schema = {entry["key"]: entry for entry in instance.get_config_schema()}
     assert schema["recall_trace"]["default"] is False
     instance.shutdown()
+
+
+def _rewrite_config(hermes_env_path, **changes) -> None:
+    """Edit the live config.json mid-process, the way a user hand-edits it."""
+    path = hermes_env_path / "hindsight" / "config.json"
+    data = json.loads(path.read_text())
+    data.update(changes)
+    path.write_text(json.dumps(data))
+
+
+def test_session_switch_reloads_retain_session_tags_from_config(provider, hermes_env):
+    """A config.json edit AFTER initialize() takes effect on the next /new, /resume, /branch."""
+    instance, fake = provider({"retain_tags": "hermes"})  # retain_session_tags defaults to True
+    instance.sync_turn("one", "1")
+    _rewrite_config(hermes_env, retain_session_tags=False)
+    instance.on_session_switch("session-2", parent_session_id="session-1")
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+
+    assert "session:session-1" in _retain_item(fake, 0)["tags"]  # before the edit: tagged
+    assert _retain_item(fake, 1)["tags"] == ["hermes"]  # after the switch: lineage tags gone
+
+
+def test_session_switch_reload_parses_string_values_and_can_turn_tags_back_on(provider, hermes_env):
+    instance, fake = provider({"retain_session_tags": "false"})
+    instance.sync_turn("one", "1")
+    _rewrite_config(hermes_env, retain_session_tags="true")
+    instance.on_session_switch("session-2", parent_session_id="session-1")
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+
+    assert "tags" not in _retain_item(fake, 0)
+    assert {"session:session-2", "parent:session-1"} <= set(_retain_item(fake, 1)["tags"])
+
+
+def test_session_switch_flushes_buffered_turns_under_the_old_policy(provider, hermes_env):
+    """The old session's buffered turns ship as the old session was configured; only the
+    new session picks up the edited policy."""
+    instance, fake = provider({"retain_every_n_turns": 2})
+    instance.sync_turn("one", "1")  # buffered, not yet shipped
+    _rewrite_config(hermes_env, retain_session_tags=False, retain_every_n_turns=1)
+    instance.on_session_switch("session-2")
+    instance.sync_turn("two", "2")  # every-n now 1 -> ships immediately
+    instance.shutdown()
+
+    assert [call["document_id"] for call in fake.retains] == ["session-1", "session-2"]
+    assert "session:session-1" in _retain_item(fake, 0)["tags"]
+    assert "tags" not in _retain_item(fake, 1)
+
+
+def test_session_switch_reloads_other_retain_policy_knobs(provider, hermes_env):
+    instance, fake = provider({})
+    _rewrite_config(hermes_env, auto_retain=False, retain_async=False, retain_every_n_turns=3)
+    instance.on_session_switch("session-2")
+    assert instance._auto_retain is False
+    assert instance._retain_async is False
+    assert instance._retain_every_n_turns == 3
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+    assert fake.retains == []  # auto_retain off after the reload
+
+
+def test_session_switch_reloads_recall_settings(provider, hermes_env):
+    """Recall knobs had the same staleness: they are pure config and reload on switch too."""
+    instance, fake = provider({}, client=FakeClient(recall_texts=["fact one"]))
+    instance.handle_tool_call("hindsight_recall", {"query": "q"})
+    assert "trace" not in fake.recalls[0] and "prefer_observations" not in fake.recalls[0]
+    _rewrite_config(hermes_env, recall_trace=True, prefer_observations="true", recall_types=["observation", "world"])
+    instance.on_session_switch("session-2")
+    instance.handle_tool_call("hindsight_recall", {"query": "q"})
+    assert fake.recalls[1]["trace"] is True
+    assert fake.recalls[1]["prefer_observations"] is True
+    assert fake.recalls[1]["types"] == ["observation", "world"]
+    instance.shutdown()
+
+
+def test_session_switch_does_not_reload_connection_settings(provider, hermes_env):
+    """Endpoint/bank/mode and the live client stay as initialize() set them: swapping them
+    under an in-flight session could split its writes across banks or servers."""
+    instance, fake = provider({"bank_id": "team"})
+    client_before, config_before = instance._get_client(), instance._config
+    _rewrite_config(hermes_env, bank_id="other", api_url="http://elsewhere:1", mode="local_external")
+    instance.on_session_switch("session-2")
+    assert instance._bank_id == "team"
+    assert instance._mode == "cloud"
+    assert instance._api_url != "http://elsewhere:1"
+    assert instance._config is config_before
+    assert instance._get_client() is client_before
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+    assert fake.retains[0]["bank_id"] == "team"
+
+
+def test_session_switch_keeps_cached_policy_when_config_reload_fails(provider, monkeypatch):
+    instance, fake = provider({"retain_session_tags": False})
+
+    def _boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(plugin, "_load_config", _boom)
+    instance.on_session_switch("session-2")  # must not raise
+    assert instance._session_id == "session-2"
+    assert instance._retain_session_tags is False
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+    assert _retain_item(fake)["metadata"]["session_id"] == "session-2"
+    assert "tags" not in _retain_item(fake)
+
+
+def test_session_switch_malformed_config_value_keeps_the_whole_cached_policy(provider, hermes_env):
+    """A hand-typo (non-int retain_every_n_turns) must not leave the policy half-applied."""
+    instance, fake = provider({"retain_session_tags": True, "recall_trace": False})
+    _rewrite_config(hermes_env, retain_session_tags=False, recall_trace=True, retain_every_n_turns="two")
+    instance.on_session_switch("session-2")
+    assert instance._session_id == "session-2"
+    assert instance._retain_session_tags is True  # not half-applied
+    assert instance._retain_every_n_turns == 1
+    assert instance._recall_trace is False
+    instance.shutdown()

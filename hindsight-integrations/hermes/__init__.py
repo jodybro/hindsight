@@ -20,6 +20,7 @@ import queue
 import sys
 import threading
 import time
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -1584,7 +1585,12 @@ class HindsightMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             self._prefetch_result = ""
 
-        # 3. Rotate to the new session.
+        # 3. Re-read config.json so a mid-process edit applies from this session on
+        # (after the flush above, which snapshotted the OLD policy, and after the
+        # prefetch join, so no worker reads the knobs mid-update).
+        self._reload_session_policy()
+
+        # 4. Rotate to the new session.
         if parent_session_id:
             self._parent_session_id = str(parent_session_id).strip()
         self._session_id, self._document_id = new_id, _mint_document_id(new_id)
@@ -1596,6 +1602,44 @@ class HindsightMemoryProvider(MemoryProvider):
             self._parent_session_id,
             reset,
             self._document_id,
+        )
+
+    def _reload_session_policy(self) -> None:
+        """Re-apply the pure-config retain policy and recall knobs from a fresh
+        ``_load_config()`` (otherwise they stay frozen at initialize() time for the
+        whole process). Deliberately NOT re-run: ``_apply_connection_settings``
+        (api_url/bank/mode/api key -- changing them under a live client could split
+        one process's writes across banks or servers) and the env-backed half of
+        ``_apply_retain_settings`` (retain_tags, observation_scopes, source and
+        speaker prefixes go through the profile secret scope). ``self._config`` is
+        left as initialize() loaded it, since the client/daemon builders read it.
+        All-or-nothing: an unreadable file or a malformed value keeps the cached policy.
+        """
+        try:
+            cfg = _load_config()
+        except Exception as e:
+            logger.warning("Hindsight config reload on session switch failed; keeping cached policy: %s", e)
+            return
+        # Parse into a scratch namespace first (both appliers only SET attributes), then
+        # copy just those attributes over -- a bad value never half-applies, and nothing
+        # else on self (writer-thread state) is touched.
+        staged = types.SimpleNamespace()
+        try:
+            type(self)._apply_retain_policy(staged, cfg)
+            type(self)._apply_recall_settings(staged, cfg)
+        except Exception as e:
+            logger.warning("Hindsight config reload on session switch rejected; keeping cached policy: %s", e)
+            return
+        vars(self).update(vars(staged))
+        logger.debug(
+            "Hindsight policy reloaded on session switch: auto_retain=%s, retain_session_tags=%s, "
+            "retain_every_n=%d, retain_async=%s, auto_recall=%s, recall_types=%s",
+            self._auto_retain,
+            self._retain_session_tags,
+            self._retain_every_n_turns,
+            self._retain_async,
+            self._auto_recall,
+            self._recall_types,
         )
 
     def _close_client(self) -> None:
