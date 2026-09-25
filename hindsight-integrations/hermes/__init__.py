@@ -772,6 +772,11 @@ class HindsightMemoryProvider(MemoryProvider):
                 "description": "On recall (auto-recall and the hindsight_recall tool), ask Hindsight to drop raw world/experience facts that a returned observation was consolidated from, so the observation supersedes them and freed slots backfill with the next results. Only has an effect when recall_types includes 'observation' plus at least one raw type ('world'/'experience'); with the observation-only default it is a no-op.",
                 "default": False,
             },
+            {
+                "key": "recall_trace",
+                "description": "On recall (auto-recall and the hindsight_recall tool), ask Hindsight for a search trace (query embedding, retrieval/RRF/rerank breakdown, phase timings) alongside the results. The trace is logged at debug level for diagnostics only; it is never injected into the prompt context, since it is large and unbounded.",
+                "default": False,
+            },
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {
                 "key": "recall_sync",
@@ -1434,6 +1439,10 @@ class HindsightMemoryProvider(MemoryProvider):
         # Server-side dedup of raw facts under the observations that summarize them;
         # only sent when on, so off keeps the arecall kwargs byte-identical.
         self._prefer_observations = _parse_bool_setting(cfg.get("prefer_observations"), False)
+        # Ask the server for a search trace on recall (query embedding, retrieval/RRF/
+        # rerank breakdown, phase timings); only sent when on, so off keeps the arecall
+        # kwargs byte-identical. Diagnostics only -- never injected into prompt context.
+        self._recall_trace = _parse_bool_setting(cfg.get("recall_trace"), False)
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
 
@@ -1562,6 +1571,8 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs["min_scores"] = self._recall_min_scores
         if self._prefer_observations:
             kwargs["prefer_observations"] = True
+        if self._recall_trace:
+            kwargs["trace"] = True
 
         async def _recall_all(client):
             extra_timeout = float(self._timeout or _DEFAULT_TIMEOUT) * _EXTRA_BANK_TIMEOUT_SHARE
