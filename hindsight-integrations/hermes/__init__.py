@@ -68,6 +68,7 @@ from .settings import (
     _normalize_min_scores,
     _normalize_observation_scopes,
     _normalize_string_list,
+    _parse_bool_setting,
     _parse_float_setting,
     _parse_int_setting,
     _project_name,
@@ -790,6 +791,11 @@ class HindsightMemoryProvider(MemoryProvider):
             },
             {"key": "retain_every_n_turns", "description": "Retain every N turns (1 = every turn)", "default": 1},
             {
+                "key": "retain_session_tags",
+                "description": "Stamp 'session:<id>' (and 'parent:<id>' on branches) tags on auto-retained turns. Turn off when consolidation scopes on exact tag sets (observation_scopes 'combined', the default): a unique per-session tag gives every session's observations their own scope that never merges with the rest of the topic. The session id is still recorded in retain metadata either way.",
+                "default": True,
+            },
+            {
                 "key": "retain_async",
                 "description": "Process retain asynchronously on the Hindsight server",
                 "default": True,
@@ -1383,6 +1389,9 @@ class HindsightMemoryProvider(MemoryProvider):
         is_cron = getattr(self, "_agent_context", "primary") == "cron"
         self._auto_retain = cfg.get("auto_retain", True) and (not is_cron or bool(cfg.get("retain_cron", False)))
         self._retain_every_n_turns = max(1, _parse_int_setting(cfg.get("retain_every_n_turns"), 1))
+        # Lineage tags split observation scopes per session under exact-tag-set
+        # consolidation; the session id stays in metadata regardless.
+        self._retain_session_tags = _parse_bool_setting(cfg.get("retain_session_tags"), True)
         self._retain_context = cfg.get("retain_context", _RETAIN_CONTEXT_DEFAULT)
         self._retain_async = cfg.get("retain_async", True)
         # On by default so the user SEES memory working whether or not the model
@@ -1758,7 +1767,8 @@ class HindsightMemoryProvider(MemoryProvider):
         # A session named as its own parent (in-place compaction) is no lineage; tagging it
         # would flip the document's tag set and re-consolidate it from scratch.
         parent = self._parent_session_id if self._parent_session_id != self._session_id else ""
-        lineage = (("session", self._session_id), ("parent", parent))
+        # retain_session_tags=False drops the lineage tags; the session id stays in metadata.
+        lineage = (("session", self._session_id), ("parent", parent)) if self._retain_session_tags else ()
         tags = [f"{kind}:{sid}" for kind, sid in lineage if sid] or None
         bank_ids = list(self._write_bank_ids)
         retain_async, retain_context = self._retain_async, self._retain_context

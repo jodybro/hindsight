@@ -7,6 +7,7 @@ from hindsight_hermes.settings import (
     _normalize_min_scores,
     _normalize_observation_scopes,
     _normalize_string_list,
+    _parse_bool_setting,
     _parse_int_setting,
     _resolve_bank_id_template,
 )
@@ -81,3 +82,18 @@ def test_clears_min_scores_rejects_a_result_that_does_not_report_the_floored_sta
 def test_clears_min_scores_keeps_a_result_with_no_scores_at_all():
     assert _clears_min_scores(types.SimpleNamespace(scores=None), {"semantic": 0.9})
     assert _clears_min_scores(types.SimpleNamespace(), {"semantic": 0.9})
+
+
+def test_parse_bool_setting_accepts_json_bools_and_common_strings():
+    assert _parse_bool_setting(True, False) is True
+    assert _parse_bool_setting(False, True) is False
+    assert _parse_bool_setting("false", True) is False
+    assert _parse_bool_setting(" Off ", True) is False
+    assert _parse_bool_setting("0", True) is False
+    assert _parse_bool_setting("yes", False) is True
+    assert _parse_bool_setting(0, True) is False
+    assert _parse_bool_setting(1, False) is True
+    # Missing / blank / garbage -> the caller's default, never a silent flip.
+    assert _parse_bool_setting(None, True) is True
+    assert _parse_bool_setting("", True) is True
+    assert _parse_bool_setting("maybe", True) is True
