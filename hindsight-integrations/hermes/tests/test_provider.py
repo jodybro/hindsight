@@ -194,3 +194,39 @@ def test_warning_sink_defaults_exist_without_initialize():
     bare = plugin.HindsightMemoryProvider()
     assert bare._warning_callback is None
     assert bare._platform == "cli"
+
+
+def test_parent_tag_is_stamped_by_default_on_a_branch(provider):
+    instance, fake = provider({})
+    instance.on_session_switch("session-2", parent_session_id="session-1")
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+    assert {"session:session-2", "parent:session-1"} <= set(_retain_item(fake)["tags"])
+
+
+def test_retain_session_tags_false_drops_session_and_parent_tags(provider):
+    instance, fake = provider({"retain_tags": "hermes", "retain_session_tags": False})
+    instance.sync_turn("one", "1")
+    instance.on_session_switch("session-2", parent_session_id="session-1")
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+
+    assert len(fake.retains) == 2
+    for index in range(2):
+        assert _retain_item(fake, index)["tags"] == ["hermes"]  # configured tags survive
+    # Session provenance is still recorded, just not as a scope-splitting tag.
+    assert _retain_item(fake, 1)["metadata"]["session_id"] == "session-2"
+
+
+def test_retain_session_tags_string_false_with_no_other_tags_sends_no_tags(provider):
+    instance, fake = provider({"retain_session_tags": "false"})
+    instance.sync_turn("one", "1")
+    instance.shutdown()
+    assert "tags" not in _retain_item(fake)
+
+
+def test_retain_session_tags_is_in_the_config_schema(provider):
+    instance, _ = provider({})
+    schema = {entry["key"]: entry for entry in instance.get_config_schema()}
+    assert schema["retain_session_tags"]["default"] is True
+    instance.shutdown()

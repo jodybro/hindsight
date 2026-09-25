@@ -59,6 +59,7 @@ from .settings import (
     _daemon_llm_provider,
     _normalize_observation_scopes,
     _normalize_retain_tags,
+    _parse_bool_setting,
     _parse_int_setting,
     _resolve_bank_id_template,
 )
@@ -644,6 +645,11 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "auto_retain", "description": "Automatically retain conversation turns", "default": True},
             {"key": "retain_every_n_turns", "description": "Retain every N turns (1 = every turn)", "default": 1},
             {
+                "key": "retain_session_tags",
+                "description": "Stamp 'session:<id>' (and 'parent:<id>' on branches) tags on auto-retained turns. Turn off when consolidation scopes on exact tag sets (observation_scopes 'combined', the default): a unique per-session tag gives every session's observations their own scope that never merges with the rest of the topic. The session id is still recorded in retain metadata either way.",
+                "default": True,
+            },
+            {
                 "key": "retain_async",
                 "description": "Process retain asynchronously on the Hindsight server",
                 "default": True,
@@ -1053,6 +1059,9 @@ class HindsightMemoryProvider(MemoryProvider):
         """Pure-config retain knobs (no env/secret reads; ``{}`` yields the defaults)."""
         self._auto_retain = cfg.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(cfg.get("retain_every_n_turns", 1)))
+        # Lineage tags split observation scopes per session under exact-tag-set
+        # consolidation; the session id stays in metadata regardless.
+        self._retain_session_tags = _parse_bool_setting(cfg.get("retain_session_tags"), True)
         self._retain_context = cfg.get("retain_context", _RETAIN_CONTEXT_DEFAULT)
         self._retain_async = cfg.get("retain_async", True)
         # On by default so the user SEES memory working whether or not the model
@@ -1347,7 +1356,11 @@ class HindsightMemoryProvider(MemoryProvider):
         writer runs after later sync_turn() calls mutate _session_turns/_turn_index/_session_id."""
         content = "[" + ",".join(turns) + "]"
         metadata = self._build_metadata(message_count=len(turns) * 2, turn_index=self._turn_index)
-        lineage = (("session", self._session_id), ("parent", self._parent_session_id))
+        lineage = (
+            (("session", self._session_id), ("parent", self._parent_session_id))
+            if self._retain_session_tags
+            else ()
+        )
         tags = [f"{kind}:{sid}" for kind, sid in lineage if sid] or None
         bank_id, retain_async, retain_context = self._bank_id, self._retain_async, self._retain_context
 

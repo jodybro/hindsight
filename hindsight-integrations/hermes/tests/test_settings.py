@@ -3,6 +3,7 @@
 from hindsight_hermes.settings import (
     _normalize_observation_scopes,
     _normalize_retain_tags,
+    _parse_bool_setting,
     _parse_int_setting,
     _resolve_bank_id_template,
 )
@@ -35,3 +36,18 @@ def test_observation_scopes_normalization():
     assert _normalize_observation_scopes(["a", "b"]) == [["a", "b"]]
     assert _normalize_observation_scopes([["a"], ["b"]]) == [["a"], ["b"]]
     assert _normalize_observation_scopes("garbage") is None
+
+
+def test_parse_bool_setting_accepts_json_bools_and_common_strings():
+    assert _parse_bool_setting(True, False) is True
+    assert _parse_bool_setting(False, True) is False
+    assert _parse_bool_setting("false", True) is False
+    assert _parse_bool_setting(" Off ", True) is False
+    assert _parse_bool_setting("0", True) is False
+    assert _parse_bool_setting("yes", False) is True
+    assert _parse_bool_setting(0, True) is False
+    assert _parse_bool_setting(1, False) is True
+    # Missing / blank / garbage -> the caller's default, never a silent flip.
+    assert _parse_bool_setting(None, True) is True
+    assert _parse_bool_setting("", True) is True
+    assert _parse_bool_setting("maybe", True) is True

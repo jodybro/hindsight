@@ -57,6 +57,29 @@ def _parse_int_setting(value: Any, default: int) -> int:
         return default
 
 
+_TRUE_STRINGS = {"true", "1", "yes", "on"}
+_FALSE_STRINGS = {"false", "0", "no", "off"}
+
+
+def _parse_bool_setting(value: Any, default: bool) -> bool:
+    """Parse a boolean config value. JSON bools/ints pass through; common strings
+    ("false", "off", "0", ...) are honoured so a hand-edited string can't silently
+    read as truthy. Missing/blank/unrecognized -> *default*."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE_STRINGS:
+        return True
+    if text in _FALSE_STRINGS:
+        return False
+    logger.warning("Invalid boolean Hindsight setting %r; using default %s", value, default)
+    return default
+
+
 def _daemon_llm_provider(provider: str) -> str:
     return "openai" if provider in _OPENAI_WIRE_PROVIDERS else provider
 
