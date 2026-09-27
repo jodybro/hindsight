@@ -740,6 +740,11 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "auto_retain", "description": "Automatically retain conversation turns", "default": True},
             {"key": "retain_every_n_turns", "description": "Retain every N turns (1 = every turn)", "default": 1},
             {
+                "key": "retain_flush_on_shutdown",
+                "description": "On shutdown (CLI exit, gateway session end), retain turns still buffered under retain_every_n_turns instead of dropping them.",
+                "default": False,
+            },
+            {
                 "key": "retain_session_tags",
                 "description": "Stamp 'session:<id>' (and 'parent:<id>' on branches) tags on auto-retained turns. Turn off when consolidation scopes on exact tag sets (observation_scopes 'combined', the default): a unique per-session tag gives every session's observations their own scope that never merges with the rest of the topic. The session id is still recorded in retain metadata either way.",
                 "default": True,
@@ -1154,6 +1159,8 @@ class HindsightMemoryProvider(MemoryProvider):
         """Pure-config retain knobs (no env/secret reads; ``{}`` yields the defaults)."""
         self._auto_retain = cfg.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(cfg.get("retain_every_n_turns", 1)))
+        # Without this, a session ending between retain boundaries loses its tail.
+        self._retain_flush_on_shutdown = _parse_bool_setting(cfg.get("retain_flush_on_shutdown"), False)
         # Lineage tags split observation scopes per session under exact-tag-set
         # consolidation; the session id stays in metadata regardless.
         self._retain_session_tags = _parse_bool_setting(cfg.get("retain_session_tags"), True)
@@ -1834,8 +1841,38 @@ class HindsightMemoryProvider(MemoryProvider):
         with contextlib.suppress(RuntimeError):
             self._client.close()
 
+    def _flush_buffered_turns_on_shutdown(self) -> None:
+        """With ``retain_flush_on_shutdown``, queue the turns still buffered under
+        ``retain_every_n_turns`` so the writer ships them before it stops. Runs before
+        ``_shutting_down`` is set; clearing the buffer makes repeat shutdowns no-ops."""
+        if not (getattr(self, "_retain_flush_on_shutdown", False) and getattr(self, "_auto_retain", False)):
+            return
+        if self._shutting_down.is_set():
+            return
+        # Append mode clears the buffer after each retain, so anything left is unshipped.
+        # Overwrite mode keeps every turn; it's unshipped only between boundaries.
+        if not self._session_turns or not self._turn_counter % self._retain_every_n_turns:
+            return
+        try:
+            document_id, update_mode = self._resolve_retain_target(self._document_id)
+            start = self._last_retained_turn_count if update_mode == "append" else 0
+            turns = self._session_turns[start:]
+            if not turns:
+                return
+            job = self._make_turn_retain_job(
+                list(turns), document_id=document_id, update_mode=update_mode, label="flush-on-shutdown", track_ops=False
+            )
+            self._enqueue_retain(job)
+            logger.debug("Hindsight shutdown: flushing %d buffered turn(s) to %s", len(turns), document_id)
+        except Exception as e:
+            logger.warning("Hindsight flush-on-shutdown failed: %s", e, exc_info=True)
+        finally:
+            self._session_turns = []
+            self._last_retained_turn_count = 0
+
     def shutdown(self) -> None:
         logger.debug("Hindsight shutdown: stopping writer + waiting for background threads")
+        self._flush_buffered_turns_on_shutdown()
         # Stop accepting retain jobs first so late sync_turn() calls are dropped.
         self._shutting_down.set()
         # The writer finishes in-flight work then exits on the sentinel; the

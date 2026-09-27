@@ -737,3 +737,97 @@ def test_recall_indicator_detail_schema_lists_the_modes(provider):
     assert entry["choices"] == ["off", "short", "debug"]
     assert entry.get("env_var") == "HINDSIGHT_RECALL_INDICATOR_DETAIL"
     instance.shutdown()
+
+
+# -- retain_flush_on_shutdown: ship the buffered tail when the session ends ---------
+
+
+def test_shutdown_drops_buffered_turns_by_default(provider):
+    """Pins upstream behavior: with the flag off, a tail under retain_every_n_turns is lost."""
+    instance, fake = provider({"retain_every_n_turns": 10})
+    for i in range(3):
+        instance.sync_turn(f"q{i}", f"a{i}")
+    instance.shutdown()
+    assert fake.retains == []
+
+
+def test_shutdown_flushes_buffered_turns_when_enabled(provider):
+    instance, fake = provider({"retain_every_n_turns": 10, "retain_flush_on_shutdown": True})
+    for i in range(3):
+        instance.sync_turn(f"q{i}", f"a{i}")
+    assert fake.retains == []  # still buffered before shutdown
+    instance.shutdown()
+
+    assert len(fake.retains) == 1
+    assert fake.retains[0]["document_id"] == "session-1"
+    assert _retain_item(fake)["update_mode"] == "append"
+    assert _turns_of(fake) == [["User: q0", "Assistant: a0"], ["User: q1", "Assistant: a1"], ["User: q2", "Assistant: a2"]]
+
+
+def test_shutdown_flush_ships_only_the_unshipped_tail(provider):
+    instance, fake = provider({"retain_every_n_turns": 2, "retain_flush_on_shutdown": True})
+    for i in range(3):
+        instance.sync_turn(f"q{i}", f"a{i}")
+    instance.shutdown()
+
+    assert len(fake.retains) == 2
+    assert _turns_of(fake, 1) == [["User: q2", "Assistant: a2"]]
+
+
+def test_shutdown_flush_is_a_noop_when_nothing_is_buffered(provider):
+    instance, fake = provider({"retain_every_n_turns": 2, "retain_flush_on_shutdown": True})
+    instance.sync_turn("q0", "a0")
+    instance.sync_turn("q1", "a1")
+    instance.shutdown()
+    assert len(fake.retains) == 1
+
+
+def test_shutdown_flush_runs_once_across_repeated_shutdowns(provider):
+    """MemoryManager.shutdown_all() and the atexit drain can both reach shutdown()."""
+    instance, fake = provider({"retain_every_n_turns": 10, "retain_flush_on_shutdown": True})
+    instance.sync_turn("q0", "a0")
+    instance.shutdown()
+    instance.shutdown()
+    instance._atexit_shutdown()
+    assert len(fake.retains) == 1
+
+
+def test_shutdown_flush_respects_auto_retain_off(provider):
+    instance, fake = provider({"auto_retain": False, "retain_flush_on_shutdown": True})
+    instance.sync_turn("q0", "a0")
+    instance.shutdown()
+    assert fake.retains == []
+
+
+def test_shutdown_flush_string_values_are_parsed(provider):
+    instance, fake = provider({"retain_every_n_turns": 10, "retain_flush_on_shutdown": "true"})
+    instance.sync_turn("q0", "a0")
+    instance.shutdown()
+    assert len(fake.retains) == 1
+
+    instance, fake = provider({"retain_every_n_turns": 10, "retain_flush_on_shutdown": "false"})
+    instance.sync_turn("q0", "a0")
+    instance.shutdown()
+    assert fake.retains == []
+
+
+def test_shutdown_flush_after_session_switch_targets_the_new_session(provider):
+    instance, fake = provider({"retain_every_n_turns": 10, "retain_flush_on_shutdown": True})
+    instance.sync_turn("old", "o")
+    instance.on_session_switch("session-2")  # flushes the old tail itself
+    instance.sync_turn("new", "n")
+    instance.shutdown()
+    assert [call["document_id"] for call in fake.retains] == ["session-1", "session-2"]
+    assert _turns_of(fake, 1) == [["User: new", "Assistant: n"]]
+
+
+def test_retain_flush_on_shutdown_is_in_the_config_schema(provider):
+    instance, _ = provider({})
+    schema = {entry["key"]: entry for entry in instance.get_config_schema()}
+    assert schema["retain_flush_on_shutdown"]["default"] is False
+    instance.shutdown()
+
+
+def test_shutdown_without_initialize_is_safe(hermes_env):
+    """Hosts construct providers for availability probes and may shut them down unused."""
+    plugin.HindsightMemoryProvider().shutdown()
