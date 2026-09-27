@@ -17,10 +17,12 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 import time
 import types
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -93,6 +95,75 @@ def _scoped_setting(name: str, default: str = "") -> str:
     except UnscopedSecretError:
         return default
     return default if value is None else value
+
+
+_DETAIL_MODES = ("off", "short", "debug")
+# The provider whose debug table was shown last; /hs-rate rates that table.
+_RATING_TARGET: Optional["weakref.ReferenceType"] = None
+
+
+def _parse_detail_mode(value: Any, env_value: Any = "") -> str:
+    """``recall_indicator_detail``: off | short | debug. Config wins; blank/None falls back to
+    the env value. Bools and bool strings are aliases (true -> short, false -> off); anything
+    else is logged and treated as off."""
+    for raw in (value, env_value):
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, bool):
+            return "short" if raw else "off"
+        text = str(raw).strip().lower()
+        if text in _DETAIL_MODES:
+            return text
+        if text in ("true", "1", "yes", "on"):
+            return "short"
+        if text in ("false", "0", "no"):
+            return "off"
+        logger.warning("Invalid recall_indicator_detail %r; expected off|short|debug, using off", raw)
+        return "off"
+    return "off"
+
+
+def _rerank_score(result: Any) -> Optional[float]:
+    """The reranker score from a RecallResult (object or dict ``scores``), else None."""
+    scores = getattr(result, "scores", None)
+    value = scores.get("reranker") if isinstance(scores, dict) else getattr(scores, "reranker", None)
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ratings_path() -> Path:
+    return get_hermes_home() / "hindsight" / "recall-ratings.jsonl"
+
+
+_RATING_TOKEN = re.compile(r"(\d+)\s*[=:]?\s*(yes|no|y|n)(?![a-z])", re.IGNORECASE)
+
+
+def _parse_ratings(raw: str) -> "dict[int, bool] | str":
+    """``"1y 2n"`` / ``"1=yes, 2:no"`` -> {1: True, 2: False}; an error string on bad input."""
+    text = (raw or "").strip()
+    if not text:
+        return "nothing to rate"
+    ratings: dict = {}
+    pos = 0
+    for match in _RATING_TOKEN.finditer(text):
+        if text[pos : match.start()].strip(" ,;\t"):
+            break
+        ratings[int(match.group(1))] = match.group(2).lower().startswith("y")
+        pos = match.end()
+    else:
+        if ratings and not text[pos:].strip(" ,;\t"):
+            return ratings
+    return f"can't parse {text!r}"
+
+
+def _hs_rate_command(raw_args: str = "") -> str:
+    """Slash-command entry point: route to the provider that showed the last debug table."""
+    target = _RATING_TARGET() if _RATING_TARGET is not None else None
+    if target is None:
+        return "Hindsight: no recall table to rate yet (needs recall_indicator_detail=debug and a recall)."
+    return target._handle_rate_command(raw_args)
 
 
 def _cloud_api_key(config: dict) -> str:
@@ -429,10 +500,14 @@ class HindsightMemoryProvider(MemoryProvider):
         # Recall: pending prefetch block + count, and the indicator state (recall_status()).
         self._prefetch_result, self._prefetch_count = "", 0
         self._prefetch_refs: list = []
+        self._prefetch_query = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
         self._last_recall_returned, self._last_recall_count = False, 0
         self._recall_detail_emitted = False
+        # recall_indicator_detail=debug: rows of the last table shown, for /hs-rate.
+        self._last_recall_rows: list = []
+        self._last_recall_query = ""
         self._apply_recall_settings({})
 
     @property
@@ -652,8 +727,10 @@ class HindsightMemoryProvider(MemoryProvider):
             },
             {
                 "key": "recall_indicator_detail",
-                "description": "Append each recalled memory's type and short id to the recall status line, e.g. '👁️ Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)'. CLI only (needs the status callback); elsewhere the plain count line is kept. No effect when recall_indicator is off.",
-                "default": False,
+                "description": "Per-memory detail on the recall status line. 'short': append each memory's type and short id, e.g. '👁️ Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)'. 'debug': also print a table under it (row #, type, full id, rerank score, relevance, text preview) and log ratings given with '/hs-rate 1y 2n' to <hermes home>/hindsight/recall-ratings.jsonl. true/false are aliases for short/off. Env fallback: HINDSIGHT_RECALL_INDICATOR_DETAIL. CLI only (needs the status callback); elsewhere the plain count line is kept. No effect when recall_indicator is off.",
+                "default": "off",
+                "choices": ["off", "short", "debug"],
+                "env_var": "HINDSIGHT_RECALL_INDICATOR_DETAIL",
             },
             {
                 "key": "retain_indicator",
@@ -1117,8 +1194,10 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_trace = _parse_bool_setting(cfg.get("recall_trace"), False)
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
-        # Presentation only: type + short id per recalled memory on the status line.
-        self._recall_indicator_detail = _parse_bool_setting(cfg.get("recall_indicator_detail"), False)
+        # Presentation only: off | short (type + short id on the status line) | debug (+ table, /hs-rate).
+        self._recall_indicator_detail = _parse_detail_mode(
+            cfg.get("recall_indicator_detail"), _scoped_setting("HINDSIGHT_RECALL_INDICATOR_DETAIL", "")
+        )
 
     def _start_embedded_daemon(self) -> None:
         """Start the embedded daemon on a background thread (Rich output -> log file)."""
@@ -1243,8 +1322,8 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _do_recall(self, query: str) -> tuple[str, int, list]:
         """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)
-        -> (text, memory count, [(type, id), ...]); the count is 0 and the refs empty for
-        reflect (synthesis) and on error."""
+        -> (text, memory count, [(type, id, rerank score, text), ...]); the count is 0 and the
+        refs empty for reflect (synthesis) and on error."""
         if self._recall_max_input_chars:
             query = query[: self._recall_max_input_chars]
         try:
@@ -1256,7 +1335,10 @@ class HindsightMemoryProvider(MemoryProvider):
             )
             results = self._recall(query)
             logger.debug("Recall: returned %d results", len(results))
-            refs = [(getattr(r, "type", None), getattr(r, "id", None)) for r in results]
+            refs = [
+                (getattr(r, "type", None), getattr(r, "id", None), _rerank_score(r), getattr(r, "text", "") or "")
+                for r in results
+            ]
             return "\n".join(f"- {r.text}" for r in results if r.text), len(results), refs
         except Exception as e:
             logger.debug("Hindsight recall failed: %s", e, exc_info=True)
@@ -1264,27 +1346,85 @@ class HindsightMemoryProvider(MemoryProvider):
 
     _TYPE_ABBREV = {"observation": "obs", "experience": "exp"}
 
-    def _emit_recall_detail(self, count: int, refs: list) -> bool:
-        """Emit the detailed recall line via the status callback; True if it was shown
-        (so ``recall_status`` suppresses the core's plain line and it isn't doubled)."""
-        if not (self._recall_indicator and self._recall_indicator_detail and self._status_callback and refs):
+    def _emit_recall_detail(self, count: int, refs: list, query: str = "") -> bool:
+        """Emit the detailed recall line (plus the debug table) via the status callback; True
+        if it was shown (so ``recall_status`` suppresses the core's plain line and it isn't doubled)."""
+        mode = self._recall_indicator_detail
+        if not (self._recall_indicator and mode != "off" and self._status_callback and refs):
             return False
         parts = [
             " ".join(p for p in (self._TYPE_ABBREV.get(t or "", t or ""), str(i or "")[:8]) if p)
-            for t, i in refs
+            for t, i, *_ in refs
         ]
         noun = "memory" if count == 1 else "memories"
+        message = f"{_HINDSIGHT_GLYPH} Hindsight — recalled {count} {noun} ({', '.join(parts)})"
+        if mode == "debug":
+            message += "\n" + self._render_recall_table(refs)
         try:
-            self._status_callback(f"{_HINDSIGHT_GLYPH} Hindsight — recalled {count} {noun} ({', '.join(parts)})")
+            self._status_callback(message)
         except Exception:
             logger.debug("recall detail status emit failed", exc_info=True)
             return False
+        if mode == "debug":
+            global _RATING_TARGET
+            self._last_recall_rows, self._last_recall_query = list(refs), query
+            _RATING_TARGET = weakref.ref(self)
         return True
 
-    def _finish_prefetch(self, result: str, count: int, refs: list | None = None) -> str:
+    def _render_recall_table(self, refs: list, ratings: dict | None = None) -> str:
+        """The debug table: row # (what /hs-rate takes), type, FULL id, rerank score, relevance, preview."""
+        ratings = ratings or {}
+        rows = [("#", "type", "id", "rerank", "relevant", "memory")]
+        for n, (t, i, score, text) in enumerate(refs, 1):
+            rel = {True: "yes", False: "no"}.get(ratings.get(n), "[ ]")
+            preview = " ".join(str(text).split())
+            preview = preview if len(preview) <= 60 else preview[:59] + "…"
+            score_s = "-" if score is None else f"{score:.2f}"
+            rows.append((str(n), self._TYPE_ABBREV.get(t or "", t or "?"), str(i or "?"), score_s, rel, preview))
+        widths = [max(len(r[c]) for r in rows) for c in range(5)]
+        lines = ["   " + "  ".join(r[c].ljust(widths[c]) for c in range(5)) + "  " + r[5] for r in rows]
+        lines.append(f"   rate: /hs-rate 1y 2n ...  (logged to {_ratings_path()})")
+        return "\n".join(line.rstrip() for line in lines)
+
+    def _handle_rate_command(self, raw_args: str) -> str:
+        """``/hs-rate 1y 2n``: log relevance ratings for the rows of the last debug table."""
+        rows, query = self._last_recall_rows, self._last_recall_query
+        if not rows:
+            return "Hindsight: no recall table to rate yet (needs recall_indicator_detail=debug and a recall)."
+        parsed = _parse_ratings(raw_args)
+        if isinstance(parsed, str):
+            return f"Hindsight: {parsed}. Usage: /hs-rate 1y 2n 3y (rows 1-{len(rows)})"
+        bad = sorted(n for n in parsed if not 1 <= n <= len(rows))
+        if bad:
+            return f"Hindsight: no row {', '.join(map(str, bad))}; the last table has rows 1-{len(rows)}"
+        ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        records = [
+            {
+                "ts": ts,
+                "session_id": self._session_id,
+                "bank_id": self._bank_id,
+                "query": query,
+                "rank": n,
+                "memory_id": rows[n - 1][1],
+                "type": rows[n - 1][0],
+                "rerank_score": rows[n - 1][2],
+                "relevant": relevant,
+            }
+            for n, relevant in sorted(parsed.items())
+        ]
+        path = _ratings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+        except OSError as e:
+            return f"Hindsight: could not write {path}: {e}"
+        return f"Hindsight: logged {len(records)} rating(s) to {path}\n" + self._render_recall_table(rows, parsed)
+
+    def _finish_prefetch(self, result: str, count: int, refs: list | None = None, query: str = "") -> str:
         """Record indicator state (cleared on empty turns, never a stale count); format the block."""
         self._last_recall_returned, self._last_recall_count = bool(result), count if result else 0
-        self._recall_detail_emitted = bool(result) and self._emit_recall_detail(count, refs or [])
+        self._recall_detail_emitted = bool(result) and self._emit_recall_detail(count, refs or [], query)
         if not result:
             logger.debug("Prefetch: no results available")
             return ""
@@ -1308,13 +1448,17 @@ class HindsightMemoryProvider(MemoryProvider):
         # injected memories match this turn's query, not the previous turn's.
         # See NousResearch/hermes-agent#5820.
         if self._recall_sync:
-            return self._finish_prefetch(*(("", 0, []) if self._recall_disabled() else self._do_recall(query)))
+            return self._finish_prefetch(
+                *(("", 0, []) if self._recall_disabled() else self._do_recall(query)), query=query
+            )
         # Default: the background worker's result for the previous turn (capped join).
         self._join_prefetch(3.0, log=True)
         with self._prefetch_lock:
             result, count, refs = self._prefetch_result, self._prefetch_count, self._prefetch_refs
+            recalled_for = self._prefetch_query
             self._prefetch_result, self._prefetch_count, self._prefetch_refs = "", 0, []
-        return self._finish_prefetch(result, count, refs)
+            self._prefetch_query = ""
+        return self._finish_prefetch(result, count, refs, query=recalled_for)
 
     def recall_status(self) -> Optional[RecallStatus]:
         """Count injected by the last prefetch; None if nothing injected or ``recall_indicator=false``."""
@@ -1336,6 +1480,7 @@ class HindsightMemoryProvider(MemoryProvider):
             if text:
                 with self._prefetch_lock:
                     self._prefetch_result, self._prefetch_count, self._prefetch_refs = text, count, refs
+                    self._prefetch_query = query
 
         self._prefetch_thread = spawn_context_thread(_run, name="hindsight-prefetch")
         self._prefetch_thread.start()
@@ -1615,6 +1760,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._join_prefetch(3.0)
         with self._prefetch_lock:
             self._prefetch_result = ""
+        self._last_recall_rows, self._last_recall_query = [], ""
 
         # 3. Re-read config.json so a mid-process edit applies from this session on
         # (after the flush above, which snapshotted the OLD policy, and after the
@@ -1723,3 +1869,14 @@ class HindsightMemoryProvider(MemoryProvider):
 def register(ctx) -> None:
     """Register Hindsight as a memory provider plugin."""
     ctx.register_memory_provider(HindsightMemoryProvider())
+    register_command = getattr(ctx, "register_command", None)
+    if register_command is not None:
+        try:
+            register_command(
+                "hs-rate",
+                _hs_rate_command,
+                description="Rate the last Hindsight recall table (recall_indicator_detail=debug): /hs-rate 1y 2n",
+                args_hint="<row>y|n ...",
+            )
+        except Exception:
+            logger.debug("hs-rate command registration failed", exc_info=True)

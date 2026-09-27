@@ -2,6 +2,7 @@
 sends to Hindsight (a recording fake client stands in for the real SDK)."""
 
 import json
+import types
 
 import hindsight_hermes as plugin
 from conftest import FakeClient
@@ -440,7 +441,7 @@ def test_recall_indicator_detail_respects_recall_indicator_off(provider):
 def test_recall_indicator_detail_is_in_the_config_schema(provider):
     instance, _ = provider({})
     schema = {entry["key"]: entry for entry in instance.get_config_schema()}
-    assert schema["recall_indicator_detail"]["default"] is False
+    assert schema["recall_indicator_detail"]["default"] == "off"  # was False; true/false still parse
     instance.shutdown()
 
 
@@ -560,4 +561,179 @@ def test_session_switch_malformed_config_value_keeps_the_whole_cached_policy(pro
     assert instance._retain_session_tags is True  # not half-applied
     assert instance._retain_every_n_turns == 1
     assert instance._recall_trace is False
+    instance.shutdown()
+
+
+
+# --- recall_indicator_detail: off | short | debug (+ /hs-rate) -------------------
+
+
+def _scored_client() -> FakeClient:
+    """Like _typed_client, plus rerank scores so the debug table has a score column."""
+    client = _typed_client()
+    base = client.arecall
+
+    async def arecall(**kwargs):
+        resp = await base(**kwargs)
+        for r, score in zip(resp.results, (0.98, 0.41)):
+            r.scores = types.SimpleNamespace(reranker=score, final=score)
+        return resp
+
+    client.arecall = arecall
+    return client
+
+
+_DEBUG_CFG = {"recall_sync": True, "recall_indicator_detail": "debug"}
+
+
+def test_recall_indicator_detail_short_is_the_true_alias(provider):
+    for value in ("short", True, "true", "SHORT"):
+        seen = []
+        instance, _ = provider({"recall_sync": True, "recall_indicator_detail": value}, client=_typed_client(),
+                               status_callback=seen.append)
+        instance.prefetch("q")
+        assert seen == [f"{plugin._HINDSIGHT_GLYPH} Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)"]
+        instance.shutdown()
+
+
+def test_recall_indicator_detail_off_values(provider):
+    for value in ("off", False, "false", "", None):
+        seen = []
+        instance, _ = provider({"recall_sync": True, "recall_indicator_detail": value}, client=_typed_client(),
+                               status_callback=seen.append)
+        instance.prefetch("q")
+        assert seen == [] and instance.recall_status().count == 2
+        instance.shutdown()
+
+
+def test_recall_indicator_detail_unknown_value_falls_back_to_off(provider):
+    seen = []
+    instance, _ = provider({"recall_sync": True, "recall_indicator_detail": "verbose"}, client=_typed_client(),
+                           status_callback=seen.append)
+    instance.prefetch("q")
+    assert seen == [] and instance._recall_indicator_detail == "off"
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_env_var_used_when_config_unset(provider):
+    plugin_secrets = __import__("conftest").SECRETS
+    plugin_secrets["HINDSIGHT_RECALL_INDICATOR_DETAIL"] = "debug"
+    instance, _ = provider({"recall_sync": True}, client=_scored_client(), status_callback=[].append)
+    assert instance._recall_indicator_detail == "debug"
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_config_wins_over_env_var(provider):
+    __import__("conftest").SECRETS["HINDSIGHT_RECALL_INDICATOR_DETAIL"] = "debug"
+    instance, _ = provider({"recall_sync": True, "recall_indicator_detail": "short"}, client=_typed_client(),
+                           status_callback=[].append)
+    assert instance._recall_indicator_detail == "short"
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_debug_emits_header_and_table_with_full_ids(provider):
+    seen = []
+    instance, _ = provider(_DEBUG_CFG, client=_scored_client(), status_callback=seen.append)
+    instance.prefetch("what do you know?")
+    assert instance.recall_status() is None
+    assert len(seen) == 1
+    lines = seen[0].splitlines()
+    assert lines[0] == f"{plugin._HINDSIGHT_GLYPH} Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)"
+    body = "\n".join(lines[1:])
+    assert "a1b2c3d4-0000-1111" in body and "9f8e7d6c-2222-3333" in body  # full ids, not truncated
+    assert "0.98" in body and "0.41" in body  # rerank score column
+    assert "rate" in body.lower() and "/hs-rate" in body
+    row1 = next(line for line in lines if "a1b2c3d4-0000-1111" in line)
+    assert row1.lstrip().startswith("1")
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_debug_on_background_prefetch(provider):
+    seen = []
+    instance, _ = provider({"recall_indicator_detail": "debug", "prefetch_waits_for_retain": False},
+                           client=_scored_client(), status_callback=seen.append)
+    instance.queue_prefetch("what do you know?")
+    instance._prefetch_thread.join(timeout=5)
+    instance.prefetch("next turn")
+    assert len(seen) == 1 and "9f8e7d6c-2222-3333" in seen[0]
+    assert instance._last_recall_query == "what do you know?"  # the query that actually produced the rows
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_debug_without_scores_shows_dash(provider):
+    seen = []
+    instance, _ = provider(_DEBUG_CFG, client=_typed_client(), status_callback=seen.append)
+    instance.prefetch("q")
+    row = next(line for line in seen[0].splitlines() if "a1b2c3d4-0000-1111" in line)
+    assert "-" in row.split("a1b2c3d4-0000-1111")[1]
+    instance.shutdown()
+
+
+def test_hs_rate_writes_jsonl_ratings(provider, hermes_env):
+    instance, _ = provider(_DEBUG_CFG, client=_scored_client(), status_callback=[].append)
+    instance.prefetch("what do you know?")
+    out = instance._handle_rate_command("1y 2n")
+    assert "2" in out
+    path = hermes_env / "hindsight" / "recall-ratings.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(r["memory_id"], r["relevant"]) for r in rows] == [("a1b2c3d4-0000-1111", True), ("9f8e7d6c-2222-3333", False)]
+    first = rows[0]
+    assert first["query"] == "what do you know?"
+    assert first["type"] == "observation" and first["rank"] == 1
+    assert first["rerank_score"] == 0.98
+    assert first["session_id"] == "session-1" and first["bank_id"]
+    assert first["ts"].endswith("Z")
+    instance.shutdown()
+
+
+def test_hs_rate_accepts_separators_and_words(provider, hermes_env):
+    instance, _ = provider(_DEBUG_CFG, client=_scored_client(), status_callback=[].append)
+    instance.prefetch("q")
+    instance._handle_rate_command("1=yes, 2:no")
+    rows = [json.loads(line) for line in (hermes_env / "hindsight" / "recall-ratings.jsonl").read_text().splitlines()]
+    assert [r["relevant"] for r in rows] == [True, False]
+    instance.shutdown()
+
+
+def test_hs_rate_rejects_bad_input_without_writing(provider, hermes_env):
+    instance, _ = provider(_DEBUG_CFG, client=_scored_client(), status_callback=[].append)
+    instance.prefetch("q")
+    path = hermes_env / "hindsight" / "recall-ratings.jsonl"
+    for bad in ("", "3y", "1maybe", "1y 9n", "banana"):
+        out = instance._handle_rate_command(bad)
+        assert out and not path.exists(), bad
+    instance.shutdown()
+
+
+def test_hs_rate_without_a_recall_says_so(provider, hermes_env):
+    instance, _ = provider(_DEBUG_CFG, client=_scored_client(), status_callback=[].append)
+    out = instance._handle_rate_command("1y")
+    assert "no recall" in out.lower()
+    assert not (hermes_env / "hindsight" / "recall-ratings.jsonl").exists()
+    instance.shutdown()
+
+
+def test_hs_rate_is_registered_as_a_slash_command():
+    registered = {}
+
+    class Ctx:
+        def register_memory_provider(self, provider):
+            registered["provider"] = provider
+
+        def register_command(self, name, handler, description="", args_hint="", **_):
+            registered[name] = (handler, args_hint)
+
+    plugin.register(Ctx())
+    assert "hs-rate" in registered
+    handler, hint = registered["hs-rate"]
+    assert hint and callable(handler)
+
+
+def test_recall_indicator_detail_schema_lists_the_modes(provider):
+    instance, _ = provider({})
+    schema = {entry["key"]: entry for entry in instance.get_config_schema()}
+    entry = schema["recall_indicator_detail"]
+    assert entry["default"] == "off"
+    assert entry["choices"] == ["off", "short", "debug"]
+    assert entry.get("env_var") == "HINDSIGHT_RECALL_INDICATOR_DETAIL"
     instance.shutdown()
