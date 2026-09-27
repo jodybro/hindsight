@@ -428,9 +428,11 @@ class HindsightMemoryProvider(MemoryProvider):
 
         # Recall: pending prefetch block + count, and the indicator state (recall_status()).
         self._prefetch_result, self._prefetch_count = "", 0
+        self._prefetch_refs: list = []
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
         self._last_recall_returned, self._last_recall_count = False, 0
+        self._recall_detail_emitted = False
         self._apply_recall_settings({})
 
     @property
@@ -647,6 +649,11 @@ class HindsightMemoryProvider(MemoryProvider):
                 "key": "recall_indicator",
                 "description": "Show a '👁️ Hindsight — recalled N memories' status line when auto-recall injects memory (turn off for customer-facing agents)",
                 "default": True,
+            },
+            {
+                "key": "recall_indicator_detail",
+                "description": "Append each recalled memory's type and short id to the recall status line, e.g. '👁️ Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)'. CLI only (needs the status callback); elsewhere the plain count line is kept. No effect when recall_indicator is off.",
+                "default": False,
             },
             {
                 "key": "retain_indicator",
@@ -1110,6 +1117,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_trace = _parse_bool_setting(cfg.get("recall_trace"), False)
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
+        # Presentation only: type + short id per recalled memory on the status line.
+        self._recall_indicator_detail = _parse_bool_setting(cfg.get("recall_indicator_detail"), False)
 
     def _start_embedded_daemon(self) -> None:
         """Start the embedded daemon on a background thread (Rich output -> log file)."""
@@ -1232,28 +1241,50 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return resp.text
 
-    def _do_recall(self, query: str) -> tuple[str, int]:
+    def _do_recall(self, query: str) -> tuple[str, int, list]:
         """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)
-        -> (text, memory count); the count is 0 for reflect (synthesis) and on error."""
+        -> (text, memory count, [(type, id), ...]); the count is 0 and the refs empty for
+        reflect (synthesis) and on error."""
         if self._recall_max_input_chars:
             query = query[: self._recall_max_input_chars]
         try:
             if self._prefetch_method == "reflect":
                 logger.debug("Recall: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
-                return self._reflect(query) or "", 0
+                return self._reflect(query) or "", 0, []
             logger.debug(
                 "Recall: calling recall (bank=%s, query_len=%d, budget=%s)", self._bank_id, len(query), self._budget
             )
             results = self._recall(query)
             logger.debug("Recall: returned %d results", len(results))
-            return "\n".join(f"- {r.text}" for r in results if r.text), len(results)
+            refs = [(getattr(r, "type", None), getattr(r, "id", None)) for r in results]
+            return "\n".join(f"- {r.text}" for r in results if r.text), len(results), refs
         except Exception as e:
             logger.debug("Hindsight recall failed: %s", e, exc_info=True)
-            return "", 0
+            return "", 0, []
 
-    def _finish_prefetch(self, result: str, count: int) -> str:
+    _TYPE_ABBREV = {"observation": "obs", "experience": "exp"}
+
+    def _emit_recall_detail(self, count: int, refs: list) -> bool:
+        """Emit the detailed recall line via the status callback; True if it was shown
+        (so ``recall_status`` suppresses the core's plain line and it isn't doubled)."""
+        if not (self._recall_indicator and self._recall_indicator_detail and self._status_callback and refs):
+            return False
+        parts = [
+            " ".join(p for p in (self._TYPE_ABBREV.get(t or "", t or ""), str(i or "")[:8]) if p)
+            for t, i in refs
+        ]
+        noun = "memory" if count == 1 else "memories"
+        try:
+            self._status_callback(f"{_HINDSIGHT_GLYPH} Hindsight — recalled {count} {noun} ({', '.join(parts)})")
+        except Exception:
+            logger.debug("recall detail status emit failed", exc_info=True)
+            return False
+        return True
+
+    def _finish_prefetch(self, result: str, count: int, refs: list | None = None) -> str:
         """Record indicator state (cleared on empty turns, never a stale count); format the block."""
         self._last_recall_returned, self._last_recall_count = bool(result), count if result else 0
+        self._recall_detail_emitted = bool(result) and self._emit_recall_detail(count, refs or [])
         if not result:
             logger.debug("Prefetch: no results available")
             return ""
@@ -1277,17 +1308,17 @@ class HindsightMemoryProvider(MemoryProvider):
         # injected memories match this turn's query, not the previous turn's.
         # See NousResearch/hermes-agent#5820.
         if self._recall_sync:
-            return self._finish_prefetch(*(("", 0) if self._recall_disabled() else self._do_recall(query)))
+            return self._finish_prefetch(*(("", 0, []) if self._recall_disabled() else self._do_recall(query)))
         # Default: the background worker's result for the previous turn (capped join).
         self._join_prefetch(3.0, log=True)
         with self._prefetch_lock:
-            result, count = self._prefetch_result, self._prefetch_count
-            self._prefetch_result, self._prefetch_count = "", 0
-        return self._finish_prefetch(result, count)
+            result, count, refs = self._prefetch_result, self._prefetch_count, self._prefetch_refs
+            self._prefetch_result, self._prefetch_count, self._prefetch_refs = "", 0, []
+        return self._finish_prefetch(result, count, refs)
 
     def recall_status(self) -> Optional[RecallStatus]:
         """Count injected by the last prefetch; None if nothing injected or ``recall_indicator=false``."""
-        if not self._recall_indicator or not self._last_recall_returned:
+        if not self._recall_indicator or not self._last_recall_returned or self._recall_detail_emitted:
             return None
         return RecallStatus(provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH)
 
@@ -1301,10 +1332,10 @@ class HindsightMemoryProvider(MemoryProvider):
             # retain to be recall-visible so the warmed context includes it.
             if self._prefetch_waits_for_retain:
                 self._wait_for_retains_drained(self._prefetch_retain_drain_timeout)
-            text, count = self._do_recall(query)
+            text, count, refs = self._do_recall(query)
             if text:
                 with self._prefetch_lock:
-                    self._prefetch_result, self._prefetch_count = text, count
+                    self._prefetch_result, self._prefetch_count, self._prefetch_refs = text, count, refs
 
         self._prefetch_thread = spawn_context_thread(_run, name="hindsight-prefetch")
         self._prefetch_thread.start()

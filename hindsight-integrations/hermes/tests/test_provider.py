@@ -347,6 +347,103 @@ def test_recall_trace_is_in_the_config_schema(provider):
     instance.shutdown()
 
 
+def _typed_client() -> FakeClient:
+    client = FakeClient(recall_texts=["fact one", "fact two"])
+    base = client.arecall
+
+    async def arecall(**kwargs):
+        resp = await base(**kwargs)
+        for r, (rid, rtype) in zip(resp.results, [("a1b2c3d4-0000-1111", "observation"), ("9f8e7d6c-2222-3333", "world")]):
+            r.id, r.type = rid, rtype
+        return resp
+
+    client.arecall = arecall
+    return client
+
+
+def test_recall_indicator_detail_off_by_default_keeps_the_plain_status(provider):
+    seen = []
+    instance, _ = provider({"recall_sync": True}, client=_typed_client(), status_callback=seen.append)
+    instance.prefetch("what do you know?")
+    status = instance.recall_status()
+    assert status is not None and status.count == 2
+    assert seen == []
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_on_sync_auto_recall_emits_type_and_short_id(provider):
+    seen = []
+    instance, _ = provider(
+        {"recall_sync": True, "recall_indicator_detail": True}, client=_typed_client(), status_callback=seen.append
+    )
+    instance.prefetch("what do you know?")
+    assert instance.recall_status() is None  # emitted directly, so the generic line is suppressed
+    assert seen == [f"{plugin._HINDSIGHT_GLYPH} Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)"]
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_on_background_prefetch(provider):
+    """The default auto-recall path (recall_sync off): refs must survive the thread handoff."""
+    seen = []
+    instance, _ = provider(
+        {"recall_indicator_detail": True, "prefetch_waits_for_retain": False},
+        client=_typed_client(),
+        status_callback=seen.append,
+    )
+    instance.queue_prefetch("what do you know?")
+    instance._prefetch_thread.join(timeout=5)
+    assert "- fact one" in instance.prefetch("next turn")
+    assert instance.recall_status() is None
+    assert seen == [f"{plugin._HINDSIGHT_GLYPH} Hindsight — recalled 2 memories (obs a1b2c3d4, world 9f8e7d6c)"]
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_string_values_are_parsed(provider):
+    seen = []
+    on, _ = provider(
+        {"recall_sync": True, "recall_indicator_detail": "true"}, client=_typed_client(), status_callback=seen.append
+    )
+    on.prefetch("q")
+    assert on.recall_status() is None and len(seen) == 1
+    on.shutdown()
+
+    seen.clear()
+    off, _ = provider(
+        {"recall_sync": True, "recall_indicator_detail": "false"}, client=_typed_client(), status_callback=seen.append
+    )
+    off.prefetch("q")
+    assert off.recall_status() is not None and seen == []
+    off.shutdown()
+
+
+def test_recall_indicator_detail_falls_back_without_a_status_callback(provider):
+    """Non-CLI platforms get no status_callback: keep the core's plain line."""
+    instance, _ = provider({"recall_sync": True, "recall_indicator_detail": True}, client=_typed_client())
+    instance.prefetch("q")
+    status = instance.recall_status()
+    assert status is not None and status.count == 2
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_respects_recall_indicator_off(provider):
+    seen = []
+    instance, _ = provider(
+        {"recall_sync": True, "recall_indicator_detail": True, "recall_indicator": False},
+        client=_typed_client(),
+        status_callback=seen.append,
+    )
+    instance.prefetch("q")
+    assert instance.recall_status() is None and seen == []
+    instance.shutdown()
+
+
+def test_recall_indicator_detail_is_in_the_config_schema(provider):
+    instance, _ = provider({})
+    schema = {entry["key"]: entry for entry in instance.get_config_schema()}
+    assert schema["recall_indicator_detail"]["default"] is False
+    instance.shutdown()
+
+
 def _rewrite_config(hermes_env_path, **changes) -> None:
     """Edit the live config.json mid-process, the way a user hand-edits it."""
     path = hermes_env_path / "hindsight" / "config.json"
