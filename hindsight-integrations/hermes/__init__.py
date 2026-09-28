@@ -574,6 +574,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._write_bank_ids: list[str] = ["hermes"]
         self._memory_mode = "hybrid"  # "context", "tools", or "hybrid"
         self._prefetch_method = "recall"  # "recall" or "reflect"
+        self._knowledge_roster, self._knowledge_roster_text = False, ""
         for name in _SESSION_KWARGS:
             setattr(self, f"_{name}", "")
         self._session_id = self._parent_session_id = self._document_id = ""
@@ -853,6 +854,11 @@ class HindsightMemoryProvider(MemoryProvider):
             {
                 "key": "recall_trace",
                 "description": "On recall (auto-recall and the hindsight_recall tool), ask Hindsight for a search trace (query embedding, retrieval/RRF/rerank breakdown, phase timings) alongside the results. The trace is logged at debug level for diagnostics only; it is never injected into the prompt context, since it is large and unbounded.",
+                "default": False,
+            },
+            {
+                "key": "knowledge_roster",
+                "description": "Append the bank's knowledge-page roster (folder path, page id, the page's question) plus a tool guide to the system prompt block, so the agent searches knowledge pages first, reflects when they are too shallow and recalls only for a specific fact. The tree is fetched once per session (initialize and session switch), never per turn, so the cached prompt prefix is unaffected. Skipped in 'context' memory_mode.",
                 "default": False,
             },
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
@@ -1312,6 +1318,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
         if self._mode == "local_embedded":
             self._start_embedded_daemon()
+        self._refresh_knowledge_roster()
 
     def _build_write_bank_ids(self) -> list[str]:
         """The deduped, ordered set of banks this provider writes to (and
@@ -1528,6 +1535,8 @@ class HindsightMemoryProvider(MemoryProvider):
         # rerank breakdown, phase timings); only sent when on, so off keeps the arecall
         # kwargs byte-identical. Diagnostics only -- never injected into prompt context.
         self._recall_trace = _parse_bool_setting(cfg.get("recall_trace"), False)
+        # Page roster + tool guide in system_prompt_block(); fetched once per session.
+        self._knowledge_roster = _parse_bool_setting(cfg.get("knowledge_roster"), False)
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
         # Presentation only: off | short (type + short id on the status line) | debug (+ table, /hs-rate).
@@ -1617,7 +1626,68 @@ class HindsightMemoryProvider(MemoryProvider):
         label = "" if mode == "hybrid" else f" ({mode} mode)"
         # With auto_recall off nothing is injected, so hybrid must not promise injected context.
         tail = _TOOL_GUIDANCE if mode == "hybrid" and not self._auto_recall else _SYSTEM_PROMPT_TAILS[mode]
-        return f"# Hindsight Memory\nActive{label}. Bank: {self._bank_id}, budget: {self._budget}.\n{tail}"
+        block = f"# Hindsight Memory\nActive{label}. Bank: {self._bank_id}, budget: {self._budget}.\n{tail}"
+        roster = getattr(self, "_knowledge_roster_text", "")
+        return f"{block}\n\n{roster}" if roster else block
+
+    # -- knowledge roster --------------------------------------------------------
+
+    _ROSTER_MAX_PAGES = 60
+    _ROSTER_LINE_CHARS = 220
+
+    def _refresh_knowledge_roster(self) -> None:
+        """Fetch the bank's knowledge-page tree and render the roster + tool guide that
+        ``system_prompt_block()`` appends. Once per session (initialize, session switch),
+        never per turn. Flag off, 'context' mode, or any failure -> no roster, and the
+        block is byte-identical to upstream."""
+        self._knowledge_roster_text = ""
+        if not self._knowledge_roster or self._memory_mode == "context" or self._mode == "disabled":
+            return
+        try:
+            tree = _run_sync(
+                self._get_client().aget_knowledge_base_tree(bank_id=self._bank_id),
+                timeout=min(self._timeout, 10),
+            )
+            self._knowledge_roster_text = self._render_knowledge_roster(tree)
+        except Exception as e:
+            logger.warning("Hindsight knowledge roster fetch failed; system prompt has no page roster: %s", e)
+
+    def _render_knowledge_roster(self, tree: Any) -> str:
+        if hasattr(tree, "to_dict"):
+            tree = tree.to_dict()
+        lines: List[str] = []
+
+        def walk(nodes, path):
+            for node in nodes or []:
+                if hasattr(node, "to_dict"):
+                    node = node.to_dict()
+                name = str(node.get("name") or "").strip()
+                if node.get("kind") == "folder":
+                    walk(node.get("children"), [*path, name])
+                    continue
+                if node.get("kind") != "page" or len(lines) >= self._ROSTER_MAX_PAGES:
+                    continue
+                head = f"- {'/'.join([*path, name])} ({node.get('id')})" + (" [stale]" if node.get("is_stale") else "")
+                question = " ".join(str(node.get("description") or "").split())
+                line = f"{head}: {question}" if question else head
+                if len(line) > self._ROSTER_LINE_CHARS:
+                    line = line[: self._ROSTER_LINE_CHARS - 1].rstrip() + "…"
+                lines.append(line)
+
+        walk((tree or {}).get("roots"), [])
+        if not lines:
+            return ""
+        bank = self._bank_id
+        guide = (
+            f"## Knowledge pages (bank {bank})\n"
+            "Curated, self-refreshing answers built from this bank's consolidated observations. "
+            "Check them FIRST for anything about past work, setup, decisions or preferences: "
+            f'search_knowledge_base(query, bank_id="{bank}") to pick a page, then '
+            f'get_knowledge_page(page_id, bank_id="{bank}") to read it (Hindsight MCP tools). '
+            "Go to reflect only when the pages are too shallow or the page is marked [stale]; "
+            "use recall only for one specific fact. Pages (path (id): question):"
+        )
+        return guide + "\n" + "\n".join(lines)
 
     # -- recall ------------------------------------------------------------------
 
@@ -2225,6 +2295,7 @@ class HindsightMemoryProvider(MemoryProvider):
             self._write_bank_ids = self._build_write_bank_ids()
         self._session_turns = []
         self._turn_counter = self._turn_index = self._last_retained_turn_count = 0
+        self._refresh_knowledge_roster()
         logger.debug(
             "Hindsight on_session_switch: new_session=%s parent=%s reset=%s doc=%s",
             self._session_id,
