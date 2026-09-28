@@ -831,3 +831,146 @@ def test_retain_flush_on_shutdown_is_in_the_config_schema(provider):
 def test_shutdown_without_initialize_is_safe(hermes_env):
     """Hosts construct providers for availability probes and may shut them down unused."""
     plugin.HindsightMemoryProvider().shutdown()
+
+
+
+# --- knowledge_roster: page roster + tool guide in the system prompt block --------------
+
+
+def _tree(stale_ids=()):
+    def page(pid, name, desc):
+        return {"id": pid, "kind": "page", "name": name, "description": desc, "is_stale": pid in stale_ids}
+
+    return {
+        "roots": [
+            {
+                "id": "kf-1",
+                "kind": "folder",
+                "name": "Hindsight knowledge",
+                "children": [
+                    page("kp-a", "Mechanics and gotchas", "How does Hindsight actually behave?"),
+                    {
+                        "id": "kf-2",
+                        "kind": "folder",
+                        "name": "Hermes",
+                        "children": [page("kp-b", "Tuning log", "Chronological changelog.\nSecond line.")],
+                    },
+                ],
+            },
+            page("kp-c", "Root page", ""),
+        ]
+    }
+
+
+class _TreeClient(FakeClient):
+    def __init__(self, tree=None, error=None, **kwargs):
+        super().__init__(**kwargs)
+        self.trees: list[str] = []
+        self._tree, self._error = tree if tree is not None else _tree(), error
+
+    async def aget_knowledge_base_tree(self, bank_id):
+        self.trees.append(bank_id)
+        if self._error:
+            raise self._error
+        return self._tree
+
+
+def test_knowledge_roster_off_by_default_keeps_the_block_and_fetches_nothing(provider):
+    fake = _TreeClient()
+    instance, _ = provider(client=fake)
+    block = instance.system_prompt_block()
+    assert fake.trees == []
+    assert "Knowledge pages" not in block
+    assert block.startswith("# Hindsight Memory\nActive.")
+
+
+def test_knowledge_roster_true_lists_pages_with_path_id_and_question(provider):
+    fake = _TreeClient()
+    instance, _ = provider({"knowledge_roster": True, "bank_id": "b1"}, client=fake)
+    block = instance.system_prompt_block()
+    assert fake.trees == ["b1"]
+    assert "- Hindsight knowledge/Mechanics and gotchas (kp-a): How does Hindsight actually behave?" in block
+    assert "- Hindsight knowledge/Hermes/Tuning log (kp-b): Chronological changelog. Second line." in block
+    assert "- Root page (kp-c)" in block
+    assert "search_knowledge_base" in block and "get_knowledge_page" in block
+
+
+def test_knowledge_roster_tool_guide_orders_pages_before_reflect_and_recall(provider):
+    instance, _ = provider({"knowledge_roster": True}, client=_TreeClient())
+    block = instance.system_prompt_block()
+    block = block[block.index("## Knowledge pages") :]
+    i_search, i_reflect, i_recall = (block.index(s) for s in ("search_knowledge_base", "reflect", "recall "))
+    assert i_search < i_reflect and i_search < i_recall
+
+
+def test_knowledge_roster_marks_stale_pages(provider):
+    instance, _ = provider({"knowledge_roster": True}, client=_TreeClient(tree=_tree(stale_ids={"kp-a"})))
+    block = instance.system_prompt_block()
+    assert "Mechanics and gotchas (kp-a) [stale]" in block
+    assert "Tuning log (kp-b) [stale]" not in block
+
+
+def test_knowledge_roster_truncates_long_questions(provider):
+    long_tree = {"roots": [{"id": "kp-x", "kind": "page", "name": "P", "description": "word " * 200}]}
+    instance, _ = provider({"knowledge_roster": True}, client=_TreeClient(tree=long_tree))
+    line = next(l for l in instance.system_prompt_block().splitlines() if l.startswith("- P (kp-x)"))
+    assert len(line) <= 220 and line.endswith("…")
+
+
+def test_knowledge_roster_string_values_are_parsed(provider):
+    fake = _TreeClient()
+    instance, _ = provider({"knowledge_roster": "true"}, client=fake)
+    assert "Knowledge pages" in instance.system_prompt_block()
+    fake2 = _TreeClient()
+    instance2, _ = provider({"knowledge_roster": "false"}, client=fake2)
+    assert fake2.trees == [] and "Knowledge pages" not in instance2.system_prompt_block()
+
+
+def test_knowledge_roster_fetch_failure_falls_back_to_the_plain_block(provider):
+    plain, _ = provider(client=_TreeClient())
+    instance, _ = provider({"knowledge_roster": True}, client=_TreeClient(error=RuntimeError("boom")))
+    assert instance.system_prompt_block() == plain.system_prompt_block()
+
+
+def test_knowledge_roster_empty_tree_adds_nothing(provider):
+    plain, _ = provider(client=_TreeClient())
+    instance, _ = provider({"knowledge_roster": True}, client=_TreeClient(tree={"roots": []}))
+    assert instance.system_prompt_block() == plain.system_prompt_block()
+
+
+def test_knowledge_roster_accepts_sdk_model_objects(provider):
+    class Model:
+        def __init__(self, d):
+            self._d = d
+
+        def to_dict(self):
+            return self._d
+
+    instance, _ = provider({"knowledge_roster": True}, client=_TreeClient(tree=Model(_tree())))
+    assert "(kp-b)" in instance.system_prompt_block()
+
+
+def test_knowledge_roster_is_refetched_on_session_switch(provider):
+    fake = _TreeClient()
+    instance, _ = provider({"knowledge_roster": True}, client=fake)
+    fake._tree = {"roots": [{"id": "kp-new", "kind": "page", "name": "New page", "description": "q"}]}
+    instance.on_session_switch("session-2")
+    assert len(fake.trees) == 2
+    block = instance.system_prompt_block()
+    assert "(kp-new)" in block and "(kp-a)" not in block
+
+
+def test_knowledge_roster_is_skipped_in_context_mode(provider):
+    fake = _TreeClient()
+    instance, _ = provider({"knowledge_roster": True, "memory_mode": "context"}, client=fake)
+    assert fake.trees == [] and "Knowledge pages" not in instance.system_prompt_block()
+
+
+def test_knowledge_roster_block_without_initialize_is_safe():
+    assert "Knowledge pages" not in plugin.HindsightMemoryProvider().system_prompt_block()
+
+
+def test_knowledge_roster_is_in_the_config_schema(provider):
+    instance, _ = provider()
+    entry = next(e for e in instance.get_config_schema() if e["key"] == "knowledge_roster")
+    assert entry["default"] is False
