@@ -51,7 +51,8 @@ vi.mock("@/components/tag-filter-input", () => ({ TagFilterInput: () => null }))
 
 const { DataView } = await import("@/components/data-view");
 
-type Row = MemoryTableRow & { id: string };
+// entities/tags aren't sort inputs any more, but the rendered table still shows them.
+type Row = MemoryTableRow & { id: string; entities?: string; tags?: string[] };
 
 function row(id: string, extra: Partial<Row> = {}): Row {
   return { id, text: id, entities: "", tags: [], ...extra };
@@ -103,22 +104,12 @@ describe("memory table sort config", () => {
     ).toEqual(["Apple", "banana", "cherry"]);
   });
 
-  it("counts entities and tags", () => {
-    const r = [
-      row("one", { entities: "Alice", tags: ["x", "y", "z"] }),
-      row("none", { entities: "", tags: undefined }),
-      row("three", { entities: "Alice, Bob, Carol", tags: ["x"] }),
-    ];
-    expect(texts(sortMemoryTableRows(r, { key: "entities", dir: "desc" }, "world"))).toEqual([
-      "three",
-      "one",
-      "none",
-    ]);
-    expect(texts(sortMemoryTableRows(r, { key: "tags", dir: "asc" }, "world"))).toEqual([
-      "none",
-      "three",
-      "one",
-    ]);
+  it("does not offer entities or tags as sort keys", () => {
+    for (const factType of ["world", "experience", "observation"]) {
+      const kinds = memoryTableSortKinds(factType);
+      expect(Object.keys(kinds)).not.toContain("entities");
+      expect(Object.keys(kinds)).not.toContain("tags");
+    }
   });
 
   it("sorts observations by proof_count, treating missing as 1", () => {

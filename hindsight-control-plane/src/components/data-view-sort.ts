@@ -5,19 +5,15 @@
  */
 import { sortRows, type SortKind, type SortState } from "@/lib/table-sort";
 
-export type MemoryTableSortKey =
-  | "memory"
-  | "entities"
-  | "tags"
-  | "sources"
-  | "occurred"
-  | "mentioned";
+/**
+ * Entities and tags are deliberately absent: they render as chip lists, and neither
+ * a chip count nor the first chip's name is an order anyone actually wants.
+ */
+export type MemoryTableSortKey = "memory" | "sources" | "occurred" | "mentioned";
 
 /** Subset of a table row (graph `table_rows` or invalidated list items) used for sorting. */
 export type MemoryTableRow = {
   text?: string | null;
-  entities?: string | null;
-  tags?: string[] | null;
   proof_count?: number | null;
   occurred_start?: string | null;
   mentioned_at?: string | null;
@@ -34,11 +30,6 @@ export const MEMORY_TABLE_COLUMNS: Record<
   { kind: SortKind; get: (row: MemoryTableRow) => unknown }
 > = {
   memory: { kind: "text", get: (row) => row.text },
-  entities: {
-    kind: "number",
-    get: (row) => (row.entities ? row.entities.split(", ").filter(Boolean).length : 0),
-  },
-  tags: { kind: "number", get: (row) => row.tags?.length ?? 0 },
   sources: { kind: "number", get: (row) => row.proof_count ?? 1 },
   occurred: { kind: "date", get: (row) => row.occurred_start },
   mentioned: { kind: "date", get: (row) => row.mentioned_at },

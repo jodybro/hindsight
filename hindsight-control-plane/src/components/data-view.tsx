@@ -34,6 +34,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableHead,
   TableHeader,
   TableRow,
   SortableTableHead,
@@ -929,22 +930,9 @@ export function DataView({
                                 >
                                   {memoryLabel}
                                 </SortableTableHead>
-                                <SortableTableHead
-                                  {...sortHeadProps}
-                                  sortKey="entities"
-                                  sortLabel={tCommon("sortBy", { column: t("columnEntities") })}
-                                  className="w-[15%]"
-                                >
-                                  {t("columnEntities")}
-                                </SortableTableHead>
-                                <SortableTableHead
-                                  {...sortHeadProps}
-                                  sortKey="tags"
-                                  sortLabel={tCommon("sortBy", { column: t("columnTags") })}
-                                  className="w-[15%]"
-                                >
-                                  {t("columnTags")}
-                                </SortableTableHead>
+                                {/* Entities and tags are chip lists, not orderable values: plain headers. */}
+                                <TableHead className="w-[15%]">{t("columnEntities")}</TableHead>
+                                <TableHead className="w-[15%]">{t("columnTags")}</TableHead>
                                 {factType === "observation" && (
                                   <SortableTableHead
                                     {...sortHeadProps}
