@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import { useTranslations } from "next-intl";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
+import { useTranslations, useLocale } from "next-intl";
 import { useBank } from "@/lib/bank-context";
 import { client, type OperationProgress } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  SortableTableHead,
 } from "@/components/ui/table";
 import {
   Dialog,
@@ -43,6 +44,12 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { DocumentChunkModal } from "./document-chunk-modal";
 import { withBasePath } from "@/lib/base-path";
+import { useTableSort } from "@/lib/use-table-sort";
+import {
+  SUB_BATCH_DEFAULT_SORT,
+  SUB_BATCH_SORT_KINDS,
+  sortSubBatches,
+} from "./operation-sub-batches-sort";
 
 interface Operation {
   id: string;
@@ -137,6 +144,74 @@ const STATUS_FILTER_VALUES = [
   "failed",
   "cancelled",
 ] as const;
+
+/** Sub-batches of a parent operation, sortable by header click (local state, not URL). */
+function SubBatchesTable({
+  rows,
+  renderStatusBadge,
+}: {
+  rows: ChildOperationStatus[];
+  renderStatusBadge: (status: string | null | undefined, title?: string | null) => ReactNode;
+}) {
+  const t = useTranslations("bankOperations");
+  const tCommon = useTranslations("common");
+  const locale = useLocale();
+  const { sort, toggle } = useTableSort(SUB_BATCH_SORT_KINDS, SUB_BATCH_DEFAULT_SORT);
+  const sortedRows = sortSubBatches(rows, sort, locale);
+  const sortHeadProps = { sort, onSort: toggle };
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <SortableTableHead
+            {...sortHeadProps}
+            sortKey="index"
+            sortLabel={tCommon("sortBy", { column: t("table.index") })}
+            className="w-[60px]"
+          >
+            {t("table.index")}
+          </SortableTableHead>
+          <SortableTableHead
+            {...sortHeadProps}
+            sortKey="id"
+            sortLabel={tCommon("sortBy", { column: t("table.id") })}
+            className="w-[100px]"
+          >
+            {t("table.id")}
+          </SortableTableHead>
+          <SortableTableHead
+            {...sortHeadProps}
+            sortKey="items"
+            sortLabel={tCommon("sortBy", { column: t("table.items") })}
+            className="w-[80px]"
+          >
+            {t("table.items")}
+          </SortableTableHead>
+          <SortableTableHead
+            {...sortHeadProps}
+            sortKey="status"
+            sortLabel={tCommon("sortBy", { column: t("table.status") })}
+          >
+            {t("table.status")}
+          </SortableTableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {sortedRows.map((child) => (
+          <TableRow key={child.operation_id}>
+            <TableCell className="text-sm">{child.sub_batch_index}</TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">
+              {child.operation_id.substring(0, 8)}
+            </TableCell>
+            <TableCell className="text-sm">{child.items_count}</TableCell>
+            <TableCell>{renderStatusBadge(child.status, child.error_message)}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
 
 export function BankOperationsView() {
   const t = useTranslations("bankOperations");
@@ -1027,30 +1102,12 @@ export function BankOperationsView() {
                               selectedOperation.child_operations.length,
                           })}
                         </div>
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead className="w-[60px]">{t("table.index")}</TableHead>
-                              <TableHead className="w-[100px]">{t("table.id")}</TableHead>
-                              <TableHead className="w-[80px]">{t("table.items")}</TableHead>
-                              <TableHead>{t("table.status")}</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {selectedOperation.child_operations.map((child) => (
-                              <TableRow key={child.operation_id}>
-                                <TableCell className="text-sm">{child.sub_batch_index}</TableCell>
-                                <TableCell className="font-mono text-xs text-muted-foreground">
-                                  {child.operation_id.substring(0, 8)}
-                                </TableCell>
-                                <TableCell className="text-sm">{child.items_count}</TableCell>
-                                <TableCell>
-                                  {renderStatusBadge(child.status, child.error_message)}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
+                        {/* Keyed by operation so each opened operation starts in API order. */}
+                        <SubBatchesTable
+                          key={selectedOperation.operation_id}
+                          rows={selectedOperation.child_operations}
+                          renderStatusBadge={renderStatusBadge}
+                        />
                       </div>
                     )}
 
