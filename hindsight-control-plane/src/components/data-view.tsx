@@ -34,10 +34,16 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
+  SortableTableHead,
 } from "@/components/ui/table";
+import { useTableSort } from "@/lib/use-table-sort";
+import {
+  MEMORY_TABLE_DEFAULT_SORT,
+  memoryTableSortKinds,
+  sortMemoryTableRows,
+} from "./data-view-sort";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -94,6 +100,8 @@ export function DataView({
 }: DataViewProps) {
   const t = useTranslations("dataView");
   const tAddDoc = useTranslations("addDocument");
+  const tCommon = useTranslations("common");
+  const locale = useLocale();
   const { currentBank } = useBank();
   const [viewMode, setViewMode] = useState<ViewMode>("constellation");
   const [compactMode, setCompactMode] = useState(compact);
@@ -228,6 +236,20 @@ export function DataView({
   // Read from the applied filters, not the live ones, so every "filtered vs.
   // unfiltered" label describes the rows actually on screen.
   const filtersActive = hasActiveMemoryFilters(appliedFilters);
+
+  // Table sort, persisted as ?sort=&dir=. It covers every loaded row, so it runs
+  // before the page slice; a new sort jumps back to page 1.
+  const { sort: tableSort, toggle: toggleTableSort } = useTableSort(
+    memoryTableSortKinds(factType),
+    MEMORY_TABLE_DEFAULT_SORT,
+    { syncUrl: true, onChange: () => setCurrentPage(1) }
+  );
+  // URL mode derives a fresh sort object each render, so memoize on its fields.
+  const { key: sortKey, dir: sortDir } = tableSort;
+  const sortedTableRows = useMemo(
+    () => sortMemoryTableRows(filteredTableRows, { key: sortKey, dir: sortDir }, factType, locale),
+    [filteredTableRows, sortKey, sortDir, factType, locale]
+  );
 
   // Helper to get normalized link type
   const getLinkTypeCategory = (type: string | undefined): string => {
@@ -886,38 +908,69 @@ export function DataView({
                 <div className="pb-4">
                   {filteredTableRows.length > 0 ? (
                     (() => {
-                      const totalPages = Math.ceil(filteredTableRows.length / itemsPerPage);
+                      const totalPages = Math.ceil(sortedTableRows.length / itemsPerPage);
                       const startIndex = (currentPage - 1) * itemsPerPage;
                       const endIndex = startIndex + itemsPerPage;
-                      const paginatedRows = filteredTableRows.slice(startIndex, endIndex);
+                      const paginatedRows = sortedTableRows.slice(startIndex, endIndex);
+                      const memoryLabel =
+                        factType === "observation" ? t("columnObservation") : t("columnMemory");
+                      const sortHeadProps = { sort: tableSort, onSort: toggleTableSort };
 
                       return (
                         <>
                           <Table className="table-fixed">
                             <TableHeader>
                               <TableRow>
-                                <TableHead
+                                <SortableTableHead
+                                  {...sortHeadProps}
+                                  sortKey="memory"
+                                  sortLabel={tCommon("sortBy", { column: memoryLabel })}
                                   className={factType === "observation" ? "w-[35%]" : "w-[38%]"}
                                 >
-                                  {factType === "observation"
-                                    ? t("columnObservation")
-                                    : t("columnMemory")}
-                                </TableHead>
-                                <TableHead className="w-[15%]">{t("columnEntities")}</TableHead>
-                                <TableHead className="w-[15%]">{t("columnTags")}</TableHead>
+                                  {memoryLabel}
+                                </SortableTableHead>
+                                <SortableTableHead
+                                  {...sortHeadProps}
+                                  sortKey="entities"
+                                  sortLabel={tCommon("sortBy", { column: t("columnEntities") })}
+                                  className="w-[15%]"
+                                >
+                                  {t("columnEntities")}
+                                </SortableTableHead>
+                                <SortableTableHead
+                                  {...sortHeadProps}
+                                  sortKey="tags"
+                                  sortLabel={tCommon("sortBy", { column: t("columnTags") })}
+                                  className="w-[15%]"
+                                >
+                                  {t("columnTags")}
+                                </SortableTableHead>
                                 {factType === "observation" && (
-                                  <TableHead className="w-[10%]">{t("columnSources")}</TableHead>
+                                  <SortableTableHead
+                                    {...sortHeadProps}
+                                    sortKey="sources"
+                                    sortLabel={tCommon("sortBy", { column: t("columnSources") })}
+                                    className="w-[10%]"
+                                  >
+                                    {t("columnSources")}
+                                  </SortableTableHead>
                                 )}
-                                <TableHead
+                                <SortableTableHead
+                                  {...sortHeadProps}
+                                  sortKey="occurred"
+                                  sortLabel={tCommon("sortBy", { column: t("columnOccurred") })}
                                   className={factType === "observation" ? "w-[12%]" : "w-[16%]"}
                                 >
                                   {t("columnOccurred")}
-                                </TableHead>
-                                <TableHead
+                                </SortableTableHead>
+                                <SortableTableHead
+                                  {...sortHeadProps}
+                                  sortKey="mentioned"
+                                  sortLabel={tCommon("sortBy", { column: t("columnMentioned") })}
                                   className={factType === "observation" ? "w-[13%]" : "w-[16%]"}
                                 >
                                   {t("columnMentioned")}
-                                </TableHead>
+                                </SortableTableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
@@ -1015,8 +1068,8 @@ export function DataView({
                           {totalPages > 1 && (
                             <div className="flex items-center justify-between mt-3 pt-3 border-t">
                               <div className="text-xs text-muted-foreground">
-                                {startIndex + 1}-{Math.min(endIndex, filteredTableRows.length)} of{" "}
-                                {filteredTableRows.length}
+                                {startIndex + 1}-{Math.min(endIndex, sortedTableRows.length)} of{" "}
+                                {sortedTableRows.length}
                               </div>
                               <div className="flex items-center gap-1">
                                 <Button
