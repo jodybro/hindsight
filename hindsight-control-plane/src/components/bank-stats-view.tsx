@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { useBank } from "@/lib/bank-context";
 import { useFeatures } from "@/lib/features-context";
 import { client, MentalModel } from "@/lib/api";
@@ -31,12 +31,18 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
+  SortableTableHead,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { useTableSort } from "@/lib/use-table-sort";
+import {
+  FAILED_CONSOLIDATION_DEFAULT_SORT,
+  FAILED_CONSOLIDATION_SORT_KINDS,
+  sortFailedConsolidations,
+} from "./failed-consolidations-sort";
 import {
   AreaChart,
   Area,
@@ -613,8 +619,16 @@ function FailedConsolidationsDialog({
 }) {
   const t = useTranslations("bankStats");
   const tFailed = useTranslations("failedConsolidations");
+  const tCommon = useTranslations("common");
+  const locale = useLocale();
   const { currentBank } = useBank();
   const [items, setItems] = useState<FailedMemoryItem[]>([]);
+  const { sort, toggle } = useTableSort(
+    FAILED_CONSOLIDATION_SORT_KINDS,
+    FAILED_CONSOLIDATION_DEFAULT_SORT
+  );
+  const sortedItems = sortFailedConsolidations(items, sort, locale);
+  const sortHeadProps = { sort, onSort: toggle };
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [recovering, setRecovering] = useState(false);
@@ -683,9 +697,29 @@ function FailedConsolidationsDialog({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[140px]">{tFailed("colFailedAt")}</TableHead>
-                <TableHead className="w-[100px]">{tFailed("colType")}</TableHead>
-                <TableHead>{tFailed("colText")}</TableHead>
+                <SortableTableHead
+                  {...sortHeadProps}
+                  sortKey="failedAt"
+                  sortLabel={tCommon("sortBy", { column: tFailed("colFailedAt") })}
+                  className="w-[140px]"
+                >
+                  {tFailed("colFailedAt")}
+                </SortableTableHead>
+                <SortableTableHead
+                  {...sortHeadProps}
+                  sortKey="type"
+                  sortLabel={tCommon("sortBy", { column: tFailed("colType") })}
+                  className="w-[100px]"
+                >
+                  {tFailed("colType")}
+                </SortableTableHead>
+                <SortableTableHead
+                  {...sortHeadProps}
+                  sortKey="text"
+                  sortLabel={tCommon("sortBy", { column: tFailed("colText") })}
+                >
+                  {tFailed("colText")}
+                </SortableTableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -696,7 +730,7 @@ function FailedConsolidationsDialog({
                   </TableCell>
                 </TableRow>
               )}
-              {items.map((row) => (
+              {sortedItems.map((row) => (
                 <TableRow key={row.id}>
                   <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                     {formatRelativeTime(row.consolidation_failed_at, t as RelativeTimeTranslator)}
