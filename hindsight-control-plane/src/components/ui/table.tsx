@@ -1,5 +1,7 @@
 import * as React from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 
+import type { SortState } from "@/lib/table-sort";
 import { cn } from "@/lib/utils";
 
 const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(
@@ -91,4 +93,72 @@ const TableCaption = React.forwardRef<
 ));
 TableCaption.displayName = "TableCaption";
 
-export { Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption };
+type SortableTableHeadProps<K extends string> = React.ThHTMLAttributes<HTMLTableCellElement> & {
+  sortKey: K;
+  sort: SortState<K>;
+  onSort: (key: K) => void;
+  /** Right-aligned (numeric) columns put the icon first so the labels line up. */
+  align?: "left" | "right";
+  /** Accessible name for the button, e.g. a translated "Sort by Name". */
+  sortLabel?: string;
+};
+
+/**
+ * A `TableHead` whose label is a button that sorts the table by `sortKey`. The `th`
+ * carries `aria-sort` for screen readers; the button keeps the header typography.
+ */
+function SortableTableHead<K extends string>({
+  sortKey,
+  sort,
+  onSort,
+  align = "left",
+  sortLabel,
+  className,
+  children,
+  ...props
+}: SortableTableHeadProps<K>) {
+  const active = sort.key === sortKey;
+  const state = active ? sort.dir : "none";
+  const Icon = state === "asc" ? ArrowUp : state === "desc" ? ArrowDown : ArrowUpDown;
+  const icon = (
+    <span data-sort-icon={state} className="inline-flex shrink-0" aria-hidden="true">
+      <Icon className={cn("h-3 w-3", !active && "opacity-40")} />
+    </span>
+  );
+  const right = align === "right";
+  return (
+    <TableHead
+      aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+      className={cn(right && "text-right", className)}
+      {...props}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        aria-label={sortLabel}
+        title={sortLabel}
+        className={cn(
+          "inline-flex items-center gap-1 uppercase tracking-wider hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm",
+          right && "justify-end ml-auto",
+          active && "text-foreground"
+        )}
+      >
+        {right && icon}
+        {children}
+        {!right && icon}
+      </button>
+    </TableHead>
+  );
+}
+
+export {
+  Table,
+  TableHeader,
+  TableBody,
+  TableFooter,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableCaption,
+  SortableTableHead,
+};
