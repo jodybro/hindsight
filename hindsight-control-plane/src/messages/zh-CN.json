@@ -41,7 +41,10 @@
     "matchAny": "任意",
     "matchAll": "全部",
     "matchAnyTooltip": "匹配任意选中标签",
-    "matchAllTooltip": "匹配所有选中标签"
+    "matchAllTooltip": "匹配所有选中标签",
+    "sortBy": "按{column}排序",
+    "sortAscending": "已按升序排列",
+    "sortDescending": "已按降序排列"
   },
   "nav": {
     "home": "前往首页",

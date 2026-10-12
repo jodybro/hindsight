@@ -41,7 +41,10 @@
     "matchAny": "l'un",
     "matchAll": "tous",
     "matchAnyTooltip": "Faire correspondre l'un des tags sélectionnés",
-    "matchAllTooltip": "Faire correspondre tous les tags sélectionnés"
+    "matchAllTooltip": "Faire correspondre tous les tags sélectionnés",
+    "sortBy": "Trier par {column}",
+    "sortAscending": "Tri croissant",
+    "sortDescending": "Tri décroissant"
   },
   "nav": {
     "home": "Aller à l'accueil",

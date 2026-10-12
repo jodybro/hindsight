@@ -41,7 +41,10 @@
     "matchAny": "einer",
     "matchAll": "alle",
     "matchAnyTooltip": "Mit einem beliebigen ausgewählten Tag übereinstimmen",
-    "matchAllTooltip": "Mit allen ausgewählten Tags übereinstimmen"
+    "matchAllTooltip": "Mit allen ausgewählten Tags übereinstimmen",
+    "sortBy": "Sortieren nach {column}",
+    "sortAscending": "Aufsteigend sortiert",
+    "sortDescending": "Absteigend sortiert"
   },
   "nav": {
     "home": "Zur Startseite",

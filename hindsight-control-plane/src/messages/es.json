@@ -41,7 +41,10 @@
     "matchAny": "cualquiera",
     "matchAll": "todas",
     "matchAnyTooltip": "Coincidir con cualquier etiqueta seleccionada",
-    "matchAllTooltip": "Coincidir con todas las etiquetas seleccionadas"
+    "matchAllTooltip": "Coincidir con todas las etiquetas seleccionadas",
+    "sortBy": "Ordenar por {column}",
+    "sortAscending": "Orden ascendente",
+    "sortDescending": "Orden descendente"
   },
   "nav": {
     "home": "Ir al inicio",

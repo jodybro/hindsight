@@ -41,7 +41,10 @@
     "matchAny": "any",
     "matchAll": "all",
     "matchAnyTooltip": "Match any selected tag",
-    "matchAllTooltip": "Match all selected tags"
+    "matchAllTooltip": "Match all selected tags",
+    "sortBy": "Sort by {column}",
+    "sortAscending": "Sorted ascending",
+    "sortDescending": "Sorted descending"
   },
   "nav": {
     "home": "Go to home",

@@ -41,7 +41,10 @@
     "matchAny": "任意",
     "matchAll": "全部",
     "matchAnyTooltip": "符合任一已選標籤",
-    "matchAllTooltip": "符合所有已選標籤"
+    "matchAllTooltip": "符合所有已選標籤",
+    "sortBy": "依{column}排序",
+    "sortAscending": "已依遞增排序",
+    "sortDescending": "已依遞減排序"
   },
   "nav": {
     "home": "前往首頁",
