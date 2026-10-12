@@ -1332,6 +1332,7 @@
     "deliveriesDialogTitle": "Webhook 전송 내역",
     "noDeliveries": "이 webhook에 대한 전송 내역이 없습니다.",
     "loadMore": "더 보기",
+    "deliveriesSortLoadedOnly": "정렬은 지금까지 불러온 전송 내역에만 적용됩니다.",
     "deliveriesTableHeaderStatus": "상태",
     "deliveriesTableHeaderHttp": "HTTP",
     "deliveriesTableHeaderAttempts": "시도",

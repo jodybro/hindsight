@@ -1332,6 +1332,7 @@
     "deliveriesDialogTitle": "Entregas de Webhook",
     "noDeliveries": "Nenhuma entrega ainda para este webhook.",
     "loadMore": "Carregar mais",
+    "deliveriesSortLoadedOnly": "A ordenação abrange apenas as entregas carregadas até agora.",
     "deliveriesTableHeaderStatus": "Status",
     "deliveriesTableHeaderHttp": "HTTP",
     "deliveriesTableHeaderAttempts": "Tentativas",

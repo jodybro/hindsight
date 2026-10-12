@@ -1332,6 +1332,7 @@
     "deliveriesDialogTitle": "Livraisons de webhook",
     "noDeliveries": "Aucune livraison pour ce webhook.",
     "loadMore": "Charger plus",
+    "deliveriesSortLoadedOnly": "Le tri ne porte que sur les livraisons déjà chargées.",
     "deliveriesTableHeaderStatus": "Statut",
     "deliveriesTableHeaderHttp": "HTTP",
     "deliveriesTableHeaderAttempts": "Tentatives",

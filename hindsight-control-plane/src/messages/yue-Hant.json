@@ -1332,6 +1332,7 @@
     "deliveriesDialogTitle": "Webhook 投遞",
     "noDeliveries": "此 webhook 目前沒有投遞記錄。",
     "loadMore": "載入更多",
+    "deliveriesSortLoadedOnly": "排序只適用於已載入嘅投遞記錄。",
     "deliveriesTableHeaderStatus": "狀態",
     "deliveriesTableHeaderHttp": "HTTP",
     "deliveriesTableHeaderAttempts": "嘗試次數",

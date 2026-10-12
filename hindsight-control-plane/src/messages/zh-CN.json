@@ -1332,6 +1332,7 @@
     "deliveriesDialogTitle": "Webhook 投递",
     "noDeliveries": "此 webhook 暂无投递记录。",
     "loadMore": "加载更多",
+    "deliveriesSortLoadedOnly": "排序仅涵盖已加载的投递记录。",
     "deliveriesTableHeaderStatus": "状态",
     "deliveriesTableHeaderHttp": "HTTP",
     "deliveriesTableHeaderAttempts": "尝试次数",

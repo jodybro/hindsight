@@ -1332,6 +1332,7 @@
     "deliveriesDialogTitle": "Webhook配信履歴",
     "noDeliveries": "このWebhookの配信履歴はまだありません。",
     "loadMore": "さらに読み込む",
+    "deliveriesSortLoadedOnly": "並べ替えは読み込み済みの配信のみが対象です。",
     "deliveriesTableHeaderStatus": "ステータス",
     "deliveriesTableHeaderHttp": "HTTP",
     "deliveriesTableHeaderAttempts": "試行回数",

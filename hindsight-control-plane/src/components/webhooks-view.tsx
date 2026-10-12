@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { useBank } from "@/lib/bank-context";
 import { client, Webhook, WebhookDelivery, WebhookHttpConfig } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  SortableTableHead,
 } from "@/components/ui/table";
 import {
   Dialog,
@@ -50,6 +51,12 @@ import {
   Pencil,
 } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
+import { useTableSort } from "@/lib/use-table-sort";
+import {
+  WEBHOOK_DELIVERY_DEFAULT_SORT,
+  WEBHOOK_DELIVERY_SORT_KINDS,
+  sortWebhookDeliveries,
+} from "./webhook-deliveries-sort";
 
 const AVAILABLE_EVENT_TYPES = [
   "consolidation.completed",
@@ -281,6 +288,103 @@ function DeliveryTableRow({
             </div>
           </TableCell>
         </TableRow>
+      )}
+    </>
+  );
+}
+
+/**
+ * The deliveries loaded so far, sortable by header click (local state, not URL).
+ * "Load more" appends to `deliveries`, and the current sort re-applies to the
+ * combined set.
+ */
+function DeliveriesTable({
+  deliveries,
+  formatDate,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+}: {
+  deliveries: WebhookDelivery[];
+  formatDate: (d: string | null) => string;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+}) {
+  const t = useTranslations("webhooksView");
+  const tCommon = useTranslations("common");
+  const locale = useLocale();
+  const { sort, toggle, isDefault } = useTableSort(
+    WEBHOOK_DELIVERY_SORT_KINDS,
+    WEBHOOK_DELIVERY_DEFAULT_SORT
+  );
+  const sortedDeliveries = sortWebhookDeliveries(deliveries, sort, locale);
+  const sortHeadProps = { sort, onSort: toggle };
+
+  return (
+    <>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-8 pl-3 pr-0" />
+              <SortableTableHead
+                {...sortHeadProps}
+                sortKey="status"
+                sortLabel={tCommon("sortBy", { column: t("deliveriesTableHeaderStatus") })}
+              >
+                {t("deliveriesTableHeaderStatus")}
+              </SortableTableHead>
+              <SortableTableHead
+                {...sortHeadProps}
+                sortKey="http"
+                sortLabel={tCommon("sortBy", { column: t("deliveriesTableHeaderHttp") })}
+              >
+                {t("deliveriesTableHeaderHttp")}
+              </SortableTableHead>
+              <SortableTableHead
+                {...sortHeadProps}
+                sortKey="attempts"
+                sortLabel={tCommon("sortBy", { column: t("deliveriesTableHeaderAttempts") })}
+                className="text-center"
+              >
+                {t("deliveriesTableHeaderAttempts")}
+              </SortableTableHead>
+              <SortableTableHead
+                {...sortHeadProps}
+                sortKey="event"
+                sortLabel={tCommon("sortBy", { column: t("deliveriesTableHeaderEvent") })}
+              >
+                {t("deliveriesTableHeaderEvent")}
+              </SortableTableHead>
+              <SortableTableHead
+                {...sortHeadProps}
+                sortKey="createdAt"
+                sortLabel={tCommon("sortBy", { column: t("deliveriesTableHeaderCreatedAt") })}
+              >
+                {t("deliveriesTableHeaderCreatedAt")}
+              </SortableTableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {/* Each row renders its own expanded detail row and owns its expanded
+                state, so keying by delivery id keeps the pair together across sorts. */}
+            {sortedDeliveries.map((delivery) => (
+              <DeliveryTableRow key={delivery.id} delivery={delivery} formatDate={formatDate} />
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+      {hasMore && (
+        <div className="flex flex-col items-center gap-1 pt-2">
+          <Button variant="outline" size="sm" onClick={onLoadMore} disabled={loadingMore}>
+            {loadingMore && <Spinner size="sm" className="mr-2" />}
+            {t("loadMore")}
+          </Button>
+          {!isDefault && (
+            <p className="text-xs text-muted-foreground">{t("deliveriesSortLoadedOnly")}</p>
+          )}
+        </div>
       )}
     </>
   );
@@ -1151,46 +1255,15 @@ export function WebhooksView() {
               <Spinner size="md" variant="jump" />
             </div>
           ) : deliveries.length > 0 ? (
-            <>
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-8 pl-3 pr-0" />
-                      <TableHead>{t("deliveriesTableHeaderStatus")}</TableHead>
-                      <TableHead>{t("deliveriesTableHeaderHttp")}</TableHead>
-                      <TableHead className="text-center">
-                        {t("deliveriesTableHeaderAttempts")}
-                      </TableHead>
-                      <TableHead>{t("deliveriesTableHeaderEvent")}</TableHead>
-                      <TableHead>{t("deliveriesTableHeaderCreatedAt")}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {deliveries.map((delivery) => (
-                      <DeliveryTableRow
-                        key={delivery.id}
-                        delivery={delivery}
-                        formatDate={formatDate}
-                      />
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              {deliveriesCursor && (
-                <div className="flex justify-center pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleLoadMoreDeliveries}
-                    disabled={loadingMoreDeliveries}
-                  >
-                    {loadingMoreDeliveries && <Spinner size="sm" className="mr-2" />}
-                    {t("loadMore")}
-                  </Button>
-                </div>
-              )}
-            </>
+            // Keyed by webhook so each one opens in API order.
+            <DeliveriesTable
+              key={selectedWebhook?.id}
+              deliveries={deliveries}
+              formatDate={formatDate}
+              hasMore={!!deliveriesCursor}
+              loadingMore={loadingMoreDeliveries}
+              onLoadMore={handleLoadMoreDeliveries}
+            />
           ) : (
             <p className="text-muted-foreground text-center py-8 text-sm">{t("noDeliveries")}</p>
           )}
