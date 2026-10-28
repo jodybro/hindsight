@@ -1519,3 +1519,127 @@ def test_knowledge_roster_is_in_the_config_schema(provider):
     instance, _ = provider()
     entry = next(e for e in instance.get_config_schema() if e["key"] == "knowledge_roster")
     assert entry["default"] is False
+
+
+# --- recall_relevance_verdict: numbered auto-recall + agent verdict line ----------
+
+_VERDICT_CFG = {"recall_sync": True, "recall_relevance_verdict": True}
+
+
+def _verdict_tool_names(instance):
+    return [t["name"] for t in instance.get_tool_schemas()]
+
+
+def test_relevance_verdict_off_by_default(provider):
+    seen = []
+    instance, _ = provider({"recall_sync": True}, client=_typed_client(), status_callback=seen.append)
+    block = instance.prefetch("q")
+    assert "- fact one" in block and "[1]" not in block and "hindsight_relevance" not in block
+    assert "hindsight_relevance" not in _verdict_tool_names(instance)
+    instance.shutdown()
+
+
+def test_relevance_verdict_numbers_memories_and_asks_for_a_verdict(provider):
+    instance, _ = provider(_VERDICT_CFG, client=_typed_client(), status_callback=[].append)
+    block = instance.prefetch("what do you know?")
+    assert "- [1] fact one" in block and "- [2] fact two" in block
+    assert "hindsight_relevance" in block
+    assert "hindsight_relevance" in _verdict_tool_names(instance)
+    instance.shutdown()
+
+
+def test_relevance_verdict_tool_emits_the_second_line(provider):
+    seen = []
+    instance, _ = provider(_VERDICT_CFG, client=_typed_client(), status_callback=seen.append)
+    instance.prefetch("what do you know?")
+    seen.clear()
+    out = json.loads(instance.handle_tool_call("hindsight_relevance", {"verdicts": "1y 2n"}))
+    assert "result" in out
+    assert seen == [f"{plugin._HINDSIGHT_GLYPH} Hindsight — relevance 1/2: ✓ obs a1b2c3d4, ✗ world 9f8e7d6c"]
+    instance.shutdown()
+
+
+def test_relevance_verdict_on_background_prefetch(provider):
+    seen = []
+    instance, _ = provider(
+        {"recall_relevance_verdict": True, "prefetch_waits_for_retain": False},
+        client=_typed_client(),
+        status_callback=seen.append,
+    )
+    instance.queue_prefetch("what do you know?")
+    instance._prefetch_thread.join(timeout=5)
+    assert "- [2] fact two" in instance.prefetch("next turn")
+    seen.clear()
+    instance.handle_tool_call("hindsight_relevance", {"verdicts": "1n 2y"})
+    assert seen == [f"{plugin._HINDSIGHT_GLYPH} Hindsight — relevance 1/2: ✗ obs a1b2c3d4, ✓ world 9f8e7d6c"]
+    instance.shutdown()
+
+
+def test_relevance_verdict_logs_agent_ratings(provider, hermes_env):
+    instance, _ = provider(_VERDICT_CFG, client=_scored_client(), status_callback=[].append)
+    instance.prefetch("what do you know?")
+    instance.handle_tool_call("hindsight_relevance", {"verdicts": "1y 2n"})
+    rows = [json.loads(line) for line in (hermes_env / "hindsight" / "recall-ratings.jsonl").read_text().splitlines()]
+    assert [(r["memory_id"], r["relevant"], r["rater"]) for r in rows] == [
+        ("a1b2c3d4-0000-1111", True, "agent"),
+        ("9f8e7d6c-2222-3333", False, "agent"),
+    ]
+    assert rows[0]["query"] == "what do you know?" and rows[0]["rerank_score"] == 0.98
+    instance.shutdown()
+
+
+def test_relevance_verdict_tool_rejects_bad_input(provider):
+    instance, _ = provider(_VERDICT_CFG, client=_typed_client(), status_callback=[].append)
+    assert instance.handle_tool_call("hindsight_relevance", {"verdicts": "1y"}).startswith("ERROR:")  # no recall yet
+    instance.prefetch("q")
+    assert instance.handle_tool_call("hindsight_relevance", {"verdicts": "3y"}).startswith("ERROR:")
+    assert instance.handle_tool_call("hindsight_relevance", {"verdicts": "maybe"}).startswith("ERROR:")
+    assert instance.handle_tool_call("hindsight_relevance", {}).startswith("ERROR:")
+    instance.shutdown()
+
+
+def test_relevance_verdict_string_values_are_parsed(provider):
+    on, _ = provider(
+        {"recall_sync": True, "recall_relevance_verdict": "true"}, client=_typed_client(), status_callback=[].append
+    )
+    assert "- [1] fact one" in on.prefetch("q")
+    on.shutdown()
+    off, _ = provider(
+        {"recall_sync": True, "recall_relevance_verdict": "false"}, client=_typed_client(), status_callback=[].append
+    )
+    assert "[1]" not in off.prefetch("q")
+    off.shutdown()
+
+
+def test_relevance_verdict_needs_a_status_callback(provider):
+    """Non-CLI platforms can't show the line: keep the upstream block and don't expose the tool."""
+    instance, _ = provider(_VERDICT_CFG, client=_typed_client())
+    block = instance.prefetch("q")
+    assert "[1]" not in block and "hindsight_relevance" not in block
+    assert "hindsight_relevance" not in _verdict_tool_names(instance)
+    instance.shutdown()
+
+
+def test_relevance_verdict_rows_cleared_on_session_switch(provider):
+    instance, _ = provider(_VERDICT_CFG, client=_typed_client(), status_callback=[].append)
+    instance.prefetch("q")
+    instance.on_session_switch("session-2")
+    assert instance.handle_tool_call("hindsight_relevance", {"verdicts": "1y"}).startswith("ERROR:")
+    instance.shutdown()
+
+
+def test_relevance_verdict_is_in_the_config_schema(provider):
+    instance, _ = provider()
+    entry = next(e for e in instance.get_config_schema() if e["key"] == "recall_relevance_verdict")
+    assert entry["default"] is False
+
+
+def test_relevance_verdict_tool_is_listed_before_initialize_for_routing(hermes_env):
+    """Core's add_provider() reads tool schemas BEFORE initialize() to build its routing table;
+    the tool must be listed then (config flag alone) or calls to it are never dispatched."""
+    (hermes_env / "hindsight").mkdir(parents=True, exist_ok=True)
+    cfg = hermes_env / "hindsight" / "config.json"
+    cfg.write_text(json.dumps({"mode": "cloud", "apiKey": "test-key", **_VERDICT_CFG}))
+    assert "hindsight_relevance" in _verdict_tool_names(plugin.HindsightMemoryProvider())
+    cfg.write_text(json.dumps({"mode": "cloud", "apiKey": "test-key"}))
+    assert "hindsight_relevance" not in _verdict_tool_names(plugin.HindsightMemoryProvider())

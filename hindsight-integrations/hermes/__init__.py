@@ -450,6 +450,25 @@ def _bank_not_written_yet(exc: Exception) -> bool:
     return getattr(exc, "status", None) == 404
 
 
+RELEVANCE_SCHEMA = {
+    "name": "hindsight_relevance",
+    "description": (
+        "Report, once per turn, whether each numbered auto-recalled memory ([1], [2], ...) is relevant "
+        "to the user's current message. Shows the user a verdict line and logs it for recall tuning."
+    ),
+    "parameters": {
+        "type": "object",
+        "required": ["verdicts"],
+        "properties": {
+            "verdicts": {
+                "type": "string",
+                "description": "One verdict per memory number: '1y 2n 3y' (y = relevant to this message, n = not).",
+            }
+        },
+    },
+}
+
+
 def _load_config() -> dict:
     """$HERMES_HOME/hindsight/config.json (profile-scoped), else ~/.hindsight/config.json
     (legacy, shared), else environment variables."""
@@ -623,6 +642,9 @@ class HindsightMemoryProvider(MemoryProvider):
         # recall_indicator_detail=debug: rows of the last table shown, for /hs-rate.
         self._last_recall_rows: list = []
         self._last_recall_query = ""
+        # recall_relevance_verdict: rows of the last numbered auto-recall, for hindsight_relevance.
+        self._verdict_rows: list = []
+        self._verdict_query = ""
         self._apply_recall_settings({})
 
     @property
@@ -878,6 +900,11 @@ class HindsightMemoryProvider(MemoryProvider):
                 "default": "off",
                 "choices": ["off", "short", "debug"],
                 "env_var": "HINDSIGHT_RECALL_INDICATOR_DETAIL",
+            },
+            {
+                "key": "recall_relevance_verdict",
+                "description": "Number each auto-recalled memory ([1], [2], ...) and ask the agent to call hindsight_relevance once per turn with a y/n verdict per memory against the user's message. The verdict is shown as a second status line under the recall line, e.g. '👁️ Hindsight — relevance 1/2: ✓ obs a1b2c3d4, ✗ world 9f8e7d6c', and logged with rater 'agent' to <hermes home>/hindsight/recall-ratings.jsonl next to /hs-rate ratings. Costs one tool call per turn with recalled memories. CLI only (needs the status callback); elsewhere the block and tool list stay upstream.",
+                "default": False,
             },
             {
                 "key": "retain_indicator",
@@ -1537,6 +1564,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_trace = _parse_bool_setting(cfg.get("recall_trace"), False)
         # Page roster + tool guide in system_prompt_block(); fetched once per session.
         self._knowledge_roster = _parse_bool_setting(cfg.get("knowledge_roster"), False)
+        # Number auto-recalled memories and ask the agent for a per-memory relevance verdict
+        # (hindsight_relevance tool -> second status line). CLI only: needs the status callback.
+        self._recall_relevance_verdict = _parse_bool_setting(cfg.get("recall_relevance_verdict"), False)
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
         # Presentation only: off | short (type + short id on the status line) | debug (+ table, /hs-rate).
@@ -1899,7 +1929,28 @@ class HindsightMemoryProvider(MemoryProvider):
             "Use this to answer questions about the user and prior sessions. "
             "Do not call tools to look up information that is already present here."
         )
+        numbered = self._number_for_verdict(refs or [], query)
+        if numbered:
+            header += (
+                "\nThese memories are numbered. Once this turn, after reading the user's message, call "
+                "hindsight_relevance with a verdict per number (e.g. '1y 2n'): y if that memory is relevant "
+                "to this message, n if not."
+            )
+            result = numbered
         return f"{header}\n\n{result}"
+
+    def _verdicts_enabled(self) -> bool:
+        return bool(self._recall_relevance_verdict and self._status_callback is not None)
+
+    def _number_for_verdict(self, refs: list, query: str) -> str:
+        """recall_relevance_verdict: the block with each memory numbered, and the rows saved
+        for hindsight_relevance; '' (upstream block) when off, without a callback, or no refs."""
+        self._verdict_rows, self._verdict_query = [], ""
+        rows = [r for r in refs if r[3]]
+        if not (self._verdicts_enabled() and rows):
+            return ""
+        self._verdict_rows, self._verdict_query = rows, query
+        return "\n".join(f"- [{n}] {r[3]}" for n, r in enumerate(rows, 1))
 
     def _join_prefetch(self, timeout: float, *, log: bool = False) -> None:
         if not (self._prefetch_thread and self._prefetch_thread.is_alive()):
@@ -2166,7 +2217,21 @@ class HindsightMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
+        if self._memory_mode == "context":
+            return []
+        tools = [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
+        return tools + [RELEVANCE_SCHEMA] if self._verdict_tool_wanted() else tools
+
+    def _verdict_tool_wanted(self) -> bool:
+        """Core reads tool schemas twice: add_provider() builds the routing table BEFORE
+        initialize() (config not loaded, no status callback yet), and the model-facing list is
+        built AFTER it. Route on the config flag alone pre-init; expose only flag + callback."""
+        if self._config is None:
+            try:
+                return _parse_bool_setting(_load_config().get("recall_relevance_verdict"), False)
+            except Exception:
+                return False
+        return self._verdicts_enabled()
 
     def _tool_retain(self, args: dict) -> str:
         content, context = args["content"], args.get("context")
@@ -2206,11 +2271,57 @@ class HindsightMemoryProvider(MemoryProvider):
         logger.debug("Tool hindsight_reflect: response_len=%d", len(text))
         return text or "No relevant memories found."
 
+    def _tool_relevance(self, args: dict) -> str:
+        rows = self._verdict_rows
+        if not (self._verdicts_enabled() and rows):
+            raise ValueError("no numbered auto-recalled memories this turn")
+        parsed = _parse_ratings(args["verdicts"])
+        if isinstance(parsed, str):
+            raise ValueError(f"{parsed}; use '1y 2n' for memories 1-{len(rows)}")
+        bad = sorted(n for n in parsed if not 1 <= n <= len(rows))
+        if bad:
+            raise ValueError(f"no memory {', '.join(map(str, bad))}; this turn has 1-{len(rows)}")
+        marks = [
+            f"{'✓' if ok else '✗'} {self._TYPE_ABBREV.get(rows[n - 1][0] or '', rows[n - 1][0] or '?')} "
+            f"{str(rows[n - 1][1] or '?')[:8]}"
+            for n, ok in sorted(parsed.items())
+        ]
+        line = f"{_HINDSIGHT_GLYPH} Hindsight — relevance {sum(parsed.values())}/{len(parsed)}: " + ", ".join(marks)
+        try:
+            self._status_callback(line)
+        except Exception:
+            logger.debug("relevance verdict status emit failed", exc_info=True)
+        ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        records = [
+            {
+                "ts": ts,
+                "session_id": self._session_id,
+                "bank_id": self._bank_id,
+                "query": self._verdict_query,
+                "rank": n,
+                "memory_id": rows[n - 1][1],
+                "type": rows[n - 1][0],
+                "rerank_score": rows[n - 1][2],
+                "relevant": ok,
+                "rater": "agent",
+            }
+            for n, ok in sorted(parsed.items())
+        ]
+        try:
+            path = _ratings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+        except OSError:
+            logger.debug("relevance verdict log write failed", exc_info=True)
+        return f"Recorded {len(records)} verdict(s)."
+
     # tool name -> (required arg, handler, user-facing failure prefix)
     _TOOL_HANDLERS = {
         "hindsight_retain": ("content", _tool_retain, "Failed to store memory"),
         "hindsight_recall": ("query", _tool_recall, "Failed to search memory"),
         "hindsight_reflect": ("query", _tool_reflect, "Failed to reflect"),
+        "hindsight_relevance": ("verdicts", _tool_relevance, "Failed to record relevance"),
     }
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
@@ -2279,6 +2390,7 @@ class HindsightMemoryProvider(MemoryProvider):
             self._prefetch_generation += 1  # a worker still running past the join must not land here
             self._prefetch_result, self._prefetch_refs = "", []
         self._last_recall_rows, self._last_recall_query = [], ""
+        self._verdict_rows, self._verdict_query = [], ""
 
         # 3. Re-read config.json so a mid-process edit applies from this session on
         # (after the flush above, which snapshotted the OLD policy, and after the
